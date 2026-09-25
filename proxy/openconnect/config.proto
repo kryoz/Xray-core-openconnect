@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package xray.proxy.openconnect;
+option csharp_namespace = "Xray.Proxy.OpenConnect";
+option go_package = "github.com/xtls/xray-core/proxy/openconnect";
+option java_package = "com.xray.proxy.openconnect";
+option java_multiple_files = true;
+
+message User {
+  string name = 1;
+  // Salted SHA-256, format "salt_hex$hash_hex".
+  string password = 2;
+  // Optional static IP address assigned to this user.
+  string ip = 3;
+}
+
+message OpenConnectInboundConfig {
+  repeated User users = 1;
+  // Virtual address pool, e.g. "10.66.0.0/24".
+  string subnet = 2;
+  repeated string dns = 3;
+  // Base MTU advertised to the client. Default 1400.
+  uint32 mtu = 4;
+  // Dead-peer detection interval in seconds. Default 90.
+  uint32 dpd = 5;
+  // Cookie validity after tunnel disconnect, in seconds. Default 300.
+  uint32 cookie_timeout = 6;
+  string cert_file = 7;
+  string key_file = 8;
+  uint32 max_clients = 9;
+  // UDP (DTLS) listen port. 0 = same as the TCP listen port.
+  uint32 dtls_port = 10;
+}
