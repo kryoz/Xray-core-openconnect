@@ -12,17 +12,19 @@ type OpenConnectUserConfig struct {
 }
 
 type OpenConnectConfig struct {
-	Users         []OpenConnectUserConfig `json:"users"`
-	Subnet        string                  `json:"subnet"`
-	DNS           []string                `json:"dns,omitempty"`
-	Routes        []string                `json:"routes,omitempty"`
-	MTU           uint32                  `json:"mtu"`
-	DPD           uint32                  `json:"dpd"`
-	CookieTimeout uint32                  `json:"cookieTimeout"`
-	CertFile      string                  `json:"certFile"`
-	KeyFile       string                  `json:"keyFile"`
-	MaxClients    uint32                  `json:"maxClients"`
-	DtlsPort      uint32                  `json:"dtlsPort"`
+	Users            []OpenConnectUserConfig `json:"users"`
+	Subnet           string                  `json:"subnet"`
+	DNS              []string                `json:"dns,omitempty"`
+	Routes           []string                `json:"routes,omitempty"`
+	MTU              uint32                  `json:"mtu"`
+	DPD              uint32                  `json:"dpd"`
+	CookieTimeout    uint32                  `json:"cookieTimeout"`
+	CertFile         string                  `json:"certFile"`
+	KeyFile          string                  `json:"keyFile"`
+	MaxClients       uint32                  `json:"maxClients"`
+	DtlsPort         uint32                  `json:"dtlsPort"`
+	CamouflageSecret string                  `json:"camouflageSecret,omitempty"`
+	CamouflageRealm  string                  `json:"camouflageRealm,omitempty"`
 }
 
 func (c *OpenConnectConfig) Build() (proto.Message, error) {
@@ -45,5 +47,7 @@ func (c *OpenConnectConfig) Build() (proto.Message, error) {
 	config.KeyFile = c.KeyFile
 	config.MaxClients = c.MaxClients
 	config.DtlsPort = c.DtlsPort
+	config.CamouflageSecret = c.CamouflageSecret
+	config.CamouflageRealm = c.CamouflageRealm
 	return config, nil
 }

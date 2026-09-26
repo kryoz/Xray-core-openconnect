@@ -104,4 +104,21 @@ func TestValidate(t *testing.T) {
 	if err := c.validate(); err == nil {
 		t.Error("expected error for IPv6 route")
 	}
+
+	c = validConfig(t)
+	c.CamouflageSecret = "forzarussia"
+	c.CamouflageRealm = "Restricted area"
+	if err := c.validate(); err != nil {
+		t.Errorf("camouflage config should be accepted: %v", err)
+	}
+	c.CamouflageSecret = "a?b"
+	if err := c.validate(); err == nil {
+		t.Error("expected error for camouflage secret with '?'")
+	}
+
+	c = validConfig(t)
+	c.CamouflageRealm = `he said "no"`
+	if err := c.validate(); err == nil {
+		t.Error("expected error for camouflage realm with quote")
+	}
 }

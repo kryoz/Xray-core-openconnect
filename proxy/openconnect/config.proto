@@ -34,4 +34,12 @@ message OpenConnectInboundConfig {
   // X-CSTP-Split-Include. When set, the client routes only these networks
   // through the tunnel instead of pulling its default route.
   repeated string routes = 11;
+  // ocserv-compatible camouflage. When set, GET/POST requests that carry
+  // neither the secret as the whole query string (client URL like
+  // "https://host/?<secret>") nor a valid session cookie are answered as a
+  // plain web server: 401 with camouflage_realm if set, otherwise 404. The
+  // check passes for the rest of the connection once matched. Empty = off.
+  string camouflage_secret = 12;
+  // Realm advertised in the 401 WWW-Authenticate header. Empty = plain 404.
+  string camouflage_realm = 13;
 }

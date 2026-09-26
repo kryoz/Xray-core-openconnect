@@ -297,6 +297,69 @@ func TestControlQueryPath(t *testing.T) {
 	}
 }
 
+// TestCamouflage covers the ocserv-compatible camouflage check: without the
+// secret (or a valid session cookie) the server answers like a plain web
+// server and closes; with the secret the normal auth flow proceeds on the
+// same connection.
+func TestCamouflage(t *testing.T) {
+	s := newTestServer(t)
+	s.conf.CamouflageSecret = "s3cret"
+	s.conf.CamouflageRealm = "Restricted area"
+
+	// No secret → 401 with realm.
+	c := dialOC(t, s)
+	writeReq(c, "POST", "/", "", "")
+	st, hdrs, _, _ := readResp(t, c)
+	if st != 401 || hdrs["www-authenticate"] != `Basic realm="Restricted area"` {
+		t.Fatalf("no secret: status %d, www-authenticate %q", st, hdrs["www-authenticate"])
+	}
+	c.Close()
+
+	// Wrong secret → same.
+	c = dialOC(t, s)
+	writeReq(c, "GET", "/?wrong", "", "")
+	if st, _, _, _ := readResp(t, c); st != 401 {
+		t.Fatalf("wrong secret: status %d, want 401", st)
+	}
+	c.Close()
+
+	// Correct secret → auth proceeds, and the pass stays for follow-up
+	// requests without the query (forms point to /auth).
+	c = dialOC(t, s)
+	writeReq(c, "POST", "/?s3cret", "", "")
+	if st, _, _, _ := readResp(t, c); st != 200 {
+		t.Fatalf("POST /?s3cret: status %d, want 200", st)
+	}
+	writeReq(c, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>testuser</username></auth></config-auth>`, "")
+	if st, _, _, _ := readResp(t, c); st != 200 {
+		t.Fatalf("POST /auth username: status %d, want 200", st)
+	}
+	writeReq(c, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><password>testpass</password></auth></config-auth>`, "")
+	st, _, setCookies, _ := readResp(t, c)
+	if st != 200 || cookieValue(setCookies) == "" {
+		t.Fatalf("auth after secret: status %d cookies %v", st, setCookies)
+	}
+	cookie := cookieValue(setCookies)
+	c.Close()
+
+	// A valid session cookie passes without the secret (resume path).
+	c = dialOC(t, s)
+	writeReq(c, "POST", "/", "", "Cookie: webvpn="+cookie+"\r\n")
+	if st, _, _, _ := readResp(t, c); st != 200 {
+		t.Fatalf("resume with cookie: status %d, want 200", st)
+	}
+	c.Close()
+
+	// No realm configured → plain 404.
+	s.conf.CamouflageRealm = ""
+	c = dialOC(t, s)
+	writeReq(c, "POST", "/", "", "")
+	if st, _, _, _ := readResp(t, c); st != 404 {
+		t.Fatalf("no realm: status %d, want 404", st)
+	}
+	c.Close()
+}
+
 // readRawHead reads a response head up to the blank line. readResp collapses
 // repeated headers into its map, so repeated lines must be checked on the wire.
 func readRawHead(t *testing.T, c *tls.Conn) string {

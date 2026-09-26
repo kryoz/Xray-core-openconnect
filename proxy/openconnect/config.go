@@ -105,6 +105,14 @@ func (c *OpenConnectInboundConfig) validate() error {
 			return errors.New("route must be IPv4: ", r).AtError()
 		}
 	}
+	// The camouflage secret is matched against the raw query string, so it
+	// must be a single unencoded token; the realm lands in a response header.
+	if strings.ContainsAny(c.CamouflageSecret, "?& \t\r\n") {
+		return errors.New("camouflageSecret must not contain '?', '&', whitespace or CR/LF").AtError()
+	}
+	if strings.ContainsAny(c.CamouflageRealm, "\"\r\n") {
+		return errors.New("camouflageRealm must not contain quotes or CR/LF").AtError()
+	}
 	if c.Mtu != 0 && (c.Mtu < MinMTU || c.Mtu > MaxMTU) {
 		return errors.New("mtu out of range [", MinMTU, ",", MaxMTU, "]: ", c.Mtu).AtError()
 	}
