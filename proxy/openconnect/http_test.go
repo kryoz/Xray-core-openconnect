@@ -64,6 +64,9 @@ func TestReadHTTP(t *testing.T) {
 	if req.path != "/" {
 		t.Errorf("path = %q, want %q (query stripped)", req.path, "/")
 	}
+	if req.query != "forzarussia" {
+		t.Errorf("query = %q, want %q", req.query, "forzarussia")
+	}
 
 	// Oversized Content-Length → error.
 	if _, err := readHTTP(bufio.NewReader(strings.NewReader("POST / HTTP/1.1\r\nContent-Length: 999999\r\n\r\n"))); err == nil {

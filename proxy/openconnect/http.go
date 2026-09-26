@@ -19,6 +19,7 @@ const maxBodyLimit = 16 * 1024
 type httpReq struct {
 	method  string
 	path    string
+	query   string // request-target query without the leading '?'
 	headers map[string]string
 	body    []byte
 }
@@ -66,15 +67,16 @@ func readHTTP(br *bufio.Reader) (*httpReq, error) {
 			return nil, errors.New("read body").Base(err).AtError()
 		}
 	}
-	// Strip the query string: openconnect clients may carry a camouflage
+	// Split off the query string: openconnect clients may carry a camouflage
 	// argument from their server URL (e.g. "POST /?<secret>", ocserv
-	// camouflage_secret). It carries no semantics here, but it would break
-	// the path comparisons in dispatch.
+	// camouflage_secret). Path comparisons need it stripped; the camouflage
+	// check compares the raw query against the configured secret.
 	path := f[1]
+	query := ""
 	if i := strings.IndexByte(path, '?'); i >= 0 {
-		path = path[:i]
+		path, query = path[:i], path[i+1:]
 	}
-	return &httpReq{method: f[0], path: path, headers: headers, body: body}, nil
+	return &httpReq{method: f[0], path: path, query: query, headers: headers, body: body}, nil
 }
 
 // writeHTTP writes an HTTP/1.1 response. body may be empty (the CONNECT

@@ -103,9 +103,17 @@ type OpenConnectInboundConfig struct {
 	// Split-routing networks (IPv4 CIDR) advertised to the client as
 	// X-CSTP-Split-Include. When set, the client routes only these networks
 	// through the tunnel instead of pulling its default route.
-	Routes        []string `protobuf:"bytes,11,rep,name=routes,proto3" json:"routes,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Routes []string `protobuf:"bytes,11,rep,name=routes,proto3" json:"routes,omitempty"`
+	// ocserv-compatible camouflage. When set, GET/POST requests that carry
+	// neither the secret as the whole query string (client URL like
+	// "https://host/?<secret>") nor a valid session cookie are answered as a
+	// plain web server: 401 with camouflage_realm if set, otherwise 404. The
+	// check passes for the rest of the connection once matched. Empty = off.
+	CamouflageSecret string `protobuf:"bytes,12,opt,name=camouflage_secret,json=camouflageSecret,proto3" json:"camouflage_secret,omitempty"`
+	// Realm advertised in the 401 WWW-Authenticate header. Empty = plain 404.
+	CamouflageRealm string `protobuf:"bytes,13,opt,name=camouflage_realm,json=camouflageRealm,proto3" json:"camouflage_realm,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *OpenConnectInboundConfig) Reset() {
@@ -215,6 +223,20 @@ func (x *OpenConnectInboundConfig) GetRoutes() []string {
 	return nil
 }
 
+func (x *OpenConnectInboundConfig) GetCamouflageSecret() string {
+	if x != nil {
+		return x.CamouflageSecret
+	}
+	return ""
+}
+
+func (x *OpenConnectInboundConfig) GetCamouflageRealm() string {
+	if x != nil {
+		return x.CamouflageRealm
+	}
+	return ""
+}
+
 var File_proxy_openconnect_config_proto protoreflect.FileDescriptor
 
 const file_proxy_openconnect_config_proto_rawDesc = "" +
@@ -223,7 +245,7 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\x04User\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12\x0e\n" +
-	"\x02ip\x18\x03 \x01(\tR\x02ip\"\xd1\x02\n" +
+	"\x02ip\x18\x03 \x01(\tR\x02ip\"\xa9\x03\n" +
 	"\x18OpenConnectInboundConfig\x122\n" +
 	"\x05users\x18\x01 \x03(\v2\x1c.xray.proxy.openconnect.UserR\x05users\x12\x16\n" +
 	"\x06subnet\x18\x02 \x01(\tR\x06subnet\x12\x10\n" +
@@ -237,7 +259,9 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"maxClients\x12\x1b\n" +
 	"\tdtls_port\x18\n" +
 	" \x01(\rR\bdtlsPort\x12\x16\n" +
-	"\x06routes\x18\v \x03(\tR\x06routesBd\n" +
+	"\x06routes\x18\v \x03(\tR\x06routes\x12+\n" +
+	"\x11camouflage_secret\x18\f \x01(\tR\x10camouflageSecret\x12)\n" +
+	"\x10camouflage_realm\x18\r \x01(\tR\x0fcamouflageRealmBd\n" +
 	"\x1acom.xray.proxy.openconnectP\x01Z+github.com/xtls/xray-core/proxy/openconnect\xaa\x02\x16Xray.Proxy.OpenConnectb\x06proto3"
 
 var (

@@ -94,17 +94,43 @@ func (s *Server) handleControl(raw net.Conn) {
 	// One bufio.Reader for the whole control connection: reusing it preserves
 	// any bytes the reader buffered past the current request.
 	br := bufio.NewReaderSize(tc, 8192)
+	var camoOK bool // camouflage passed on this connection (secret or cookie)
 	for {
 		tc.SetReadDeadline(time.Now().Add(authTimeout))
 		req, err := readHTTP(br)
 		if err != nil {
 			return
 		}
+		// ocserv-compatible camouflage: until the check passes on this
+		// connection, GET/POST without the secret look like a plain web
+		// server. CONNECT is exempt (it already requires a session cookie).
+		if s.conf.CamouflageSecret != "" && !camoOK && req.method != "CONNECT" {
+			if s.sessFromCookie(req.headers["cookie"]) != nil || req.query == s.conf.CamouflageSecret {
+				camoOK = true
+			} else {
+				errors.LogInfo(s.ctx, fmt.Sprintf("openconnect: camouflage: secret not found in URL from %s, declining", peerIP))
+				s.rejectCamouflage(tc)
+				return
+			}
+		}
 		done := s.dispatch(tc, req, peerIP, kl)
 		if done {
 			return
 		}
 	}
+}
+
+// rejectCamouflage answers a request that failed the camouflage check the way
+// ocserv does: a browser-facing 401 with the configured realm, or a plain 404.
+// Both close the connection.
+func (s *Server) rejectCamouflage(tc *tls.Conn) {
+	if realm := s.conf.CamouflageRealm; realm != "" {
+		_ = writeHTTP(tc, 401, "",
+			map[string][]string{"WWW-Authenticate": {`Basic realm="` + realm + `"`}},
+			"<html><body><h1>401 Unauthorized</h1></body></html>\r\n")
+		return
+	}
+	_ = writeHTTP(tc, 404, "", nil, "<html><body><h1>404 Not Found</h1></body></html>\r\n")
 }
 
 // dispatch routes one control request. It returns true when the connection's
