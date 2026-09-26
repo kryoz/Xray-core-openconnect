@@ -96,6 +96,15 @@ func (c *OpenConnectInboundConfig) validate() error {
 			staticIPs[ip] = u.Name
 		}
 	}
+	for _, r := range c.Routes {
+		p, err := netip.ParsePrefix(r)
+		if err != nil {
+			return errors.New("invalid route (want IPv4 CIDR): ", r).Base(err).AtError()
+		}
+		if !p.Addr().Is4() {
+			return errors.New("route must be IPv4: ", r).AtError()
+		}
+	}
 	if c.Mtu != 0 && (c.Mtu < MinMTU || c.Mtu > MaxMTU) {
 		return errors.New("mtu out of range [", MinMTU, ",", MaxMTU, "]: ", c.Mtu).AtError()
 	}

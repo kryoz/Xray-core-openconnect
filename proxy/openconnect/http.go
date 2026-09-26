@@ -70,15 +70,18 @@ func readHTTP(br *bufio.Reader) (*httpReq, error) {
 }
 
 // writeHTTP writes an HTTP/1.1 response. body may be empty (the CONNECT
-// response must have no body after the blank line).
-func writeHTTP(w io.Writer, code int, contentType string, hdrs map[string]string, body string) error {
+// response must have no body after the blank line). A header key with several
+// values is written as repeated header lines (e.g. X-CSTP-Split-Include).
+func writeHTTP(w io.Writer, code int, contentType string, hdrs map[string][]string, body string) error {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\n", code, httpStatusText(code))
 	if contentType != "" {
 		fmt.Fprintf(&b, "Content-Type: %s\r\n", contentType)
 	}
-	for k, v := range hdrs {
-		fmt.Fprintf(&b, "%s: %s\r\n", k, v)
+	for k, vs := range hdrs {
+		for _, v := range vs {
+			fmt.Fprintf(&b, "%s: %s\r\n", k, v)
+		}
 	}
 	fmt.Fprintf(&b, "Content-Length: %d\r\n", len(body))
 	// No Connection header: HTTP/1.1 defaults to keep-alive, which is what this

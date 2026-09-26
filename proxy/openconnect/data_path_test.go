@@ -1,10 +1,13 @@
 package openconnect
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,4 +245,51 @@ func TestDTLSReconnectAfterDisconnect(t *testing.T) {
 	// stale pipe.
 	dc2 := dialDTLS(t, s, psk)
 	dc2.Close()
+}
+
+// TestConnectSplitRoutes verifies that split-routing networks are advertised
+// as repeated X-CSTP-Split-Include header lines: libopenconnect collects one
+// route per header line and does not parse comma-joined values.
+func TestConnectSplitRoutes(t *testing.T) {
+	s := newTestServer(t)
+	s.conf.Routes = []string{"10.50.0.0/16", "192.168.100.0/24"}
+
+	c1 := dialOC(t, s)
+	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>testuser</username></auth></config-auth>`, "")
+	readResp(t, c1)
+	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><password>testpass</password></auth></config-auth>`, "")
+	_, _, setCookies, _ := readResp(t, c1)
+	cookie := cookieValue(setCookies)
+	c1.Close()
+
+	c2 := dialOC(t, s)
+	defer c2.Close()
+	writeReq(c2, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
+	raw := readRawHead(t, c2)
+	for _, want := range s.conf.Routes {
+		if !strings.Contains(raw, "X-CSTP-Split-Include: "+want+"\r\n") {
+			t.Errorf("missing split route %s in CONNECT response:\n%s", want, raw)
+		}
+	}
+}
+
+// readRawHead reads a response head up to the blank line. readResp collapses
+// repeated headers into its map, so repeated lines must be checked on the wire.
+func readRawHead(t *testing.T, c *tls.Conn) string {
+	t.Helper()
+	if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("deadline: %v", err)
+	}
+	br := bufio.NewReader(c)
+	var sb strings.Builder
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read response head: %v", err)
+		}
+		sb.WriteString(line)
+		if line == "\r\n" {
+			return sb.String()
+		}
+	}
 }

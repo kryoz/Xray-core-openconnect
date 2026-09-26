@@ -187,7 +187,7 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLo
 	maxAge := int64(s.cookieTimeoutSecs())
 	cookies := "Set-Cookie: webvpncontext=" + sidB64 + "; Max-Age=" + strconv.FormatInt(maxAge, 10) + "; Secure; HttpOnly\r\n" +
 		"Set-Cookie: webvpn=" + sidB64 + "; Secure; HttpOnly"
-	_ = writeHTTP(tc, 200, "text/xml; charset=utf-8", map[string]string{"Set-Cookie": cookies}, successMsg)
+	_ = writeHTTP(tc, 200, "text/xml; charset=utf-8", map[string][]string{"Set-Cookie": {cookies}}, successMsg)
 }
 
 func (s *Server) handleConnect(tc *tls.Conn, req *httpReq, kl *keyLog) {
@@ -251,7 +251,7 @@ func (s *Server) gcLoop() {
 	}
 }
 
-func (s *Server) connectHeaders(sess *ocSession) map[string]string {
+func (s *Server) connectHeaders(sess *ocSession) map[string][]string {
 	baseMTU := s.conf.Mtu
 	if baseMTU == 0 {
 		baseMTU = DefaultMTU
@@ -264,20 +264,25 @@ func (s *Server) connectHeaders(sess *ocSession) map[string]string {
 	if s.conf.DtlsPort != 0 {
 		udpPort = int(s.conf.DtlsPort)
 	}
-	hdrs := map[string]string{
-		"X-CSTP-Address":     sess.ip.String(),
-		"X-CSTP-Netmask":     s.registry.pool.netmask(),
-		"X-CSTP-Base-MTU":    strconv.FormatUint(uint64(baseMTU), 10),
-		"X-CSTP-MTU":         strconv.FormatUint(uint64(baseMTU-dataMTUOverhead), 10),
-		"X-CSTP-Keepalive":   strconv.Itoa(cstpKeepalive),
-		"X-CSTP-DPD":         strconv.FormatUint(uint64(dpd), 10),
-		"X-CSTP-Rekey-Time":  "0",
-		"X-DTLS-Port":        strconv.Itoa(udpPort),
-		"X-DTLS-App-ID":      sess.appID,
-		"X-DTLS-CipherSuite": "PSK-NEGOTIATE",
+	hdrs := map[string][]string{
+		"X-CSTP-Address":     {sess.ip.String()},
+		"X-CSTP-Netmask":     {s.registry.pool.netmask()},
+		"X-CSTP-Base-MTU":    {strconv.FormatUint(uint64(baseMTU), 10)},
+		"X-CSTP-MTU":         {strconv.FormatUint(uint64(baseMTU-dataMTUOverhead), 10)},
+		"X-CSTP-Keepalive":   {strconv.Itoa(cstpKeepalive)},
+		"X-CSTP-DPD":         {strconv.FormatUint(uint64(dpd), 10)},
+		"X-CSTP-Rekey-Time":  {"0"},
+		"X-DTLS-Port":        {strconv.Itoa(udpPort)},
+		"X-DTLS-App-ID":      {sess.appID},
+		"X-DTLS-CipherSuite": {"PSK-NEGOTIATE"},
 	}
 	if len(s.conf.Dns) > 0 {
-		hdrs["X-CSTP-DNS"] = strings.Join(s.conf.Dns, ",")
+		hdrs["X-CSTP-DNS"] = []string{strings.Join(s.conf.Dns, ",")}
+	}
+	// Split routing: each network is a separate repeated header line, as the
+	// client (libopenconnect/vpnc-script) collects routes per header line.
+	for _, r := range s.conf.Routes {
+		hdrs["X-CSTP-Split-Include"] = append(hdrs["X-CSTP-Split-Include"], r)
 	}
 	// No X-DTLS-Content-Encoding: ocserv omits it when compression is off.
 	return hdrs

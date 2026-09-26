@@ -88,4 +88,20 @@ func TestValidate(t *testing.T) {
 	if err := c.validate(); err == nil {
 		t.Error("expected error for bad static ip")
 	}
+
+	c = validConfig(t)
+	c.Routes = []string{"10.0.0.0/8", "192.168.1.0/24"}
+	if err := c.validate(); err != nil {
+		t.Errorf("routes should be accepted: %v", err)
+	}
+	c.Routes = append(c.Routes, "bogus")
+	if err := c.validate(); err == nil {
+		t.Error("expected error for bad route")
+	}
+
+	c = validConfig(t)
+	c.Routes = []string{"fd00::/8"}
+	if err := c.validate(); err == nil {
+		t.Error("expected error for IPv6 route")
+	}
 }
