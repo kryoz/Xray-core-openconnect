@@ -99,7 +99,11 @@ type OpenConnectInboundConfig struct {
 	KeyFile       string `protobuf:"bytes,8,opt,name=key_file,json=keyFile,proto3" json:"key_file,omitempty"`
 	MaxClients    uint32 `protobuf:"varint,9,opt,name=max_clients,json=maxClients,proto3" json:"max_clients,omitempty"`
 	// UDP (DTLS) listen port. 0 = same as the TCP listen port.
-	DtlsPort      uint32 `protobuf:"varint,10,opt,name=dtls_port,json=dtlsPort,proto3" json:"dtls_port,omitempty"`
+	DtlsPort uint32 `protobuf:"varint,10,opt,name=dtls_port,json=dtlsPort,proto3" json:"dtls_port,omitempty"`
+	// Split-routing networks (IPv4 CIDR) advertised to the client as
+	// X-CSTP-Split-Include. When set, the client routes only these networks
+	// through the tunnel instead of pulling its default route.
+	Routes        []string `protobuf:"bytes,11,rep,name=routes,proto3" json:"routes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -204,6 +208,13 @@ func (x *OpenConnectInboundConfig) GetDtlsPort() uint32 {
 	return 0
 }
 
+func (x *OpenConnectInboundConfig) GetRoutes() []string {
+	if x != nil {
+		return x.Routes
+	}
+	return nil
+}
+
 var File_proxy_openconnect_config_proto protoreflect.FileDescriptor
 
 const file_proxy_openconnect_config_proto_rawDesc = "" +
@@ -212,7 +223,7 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\x04User\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12\x0e\n" +
-	"\x02ip\x18\x03 \x01(\tR\x02ip\"\xb9\x02\n" +
+	"\x02ip\x18\x03 \x01(\tR\x02ip\"\xd1\x02\n" +
 	"\x18OpenConnectInboundConfig\x122\n" +
 	"\x05users\x18\x01 \x03(\v2\x1c.xray.proxy.openconnect.UserR\x05users\x12\x16\n" +
 	"\x06subnet\x18\x02 \x01(\tR\x06subnet\x12\x10\n" +
@@ -225,7 +236,8 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\vmax_clients\x18\t \x01(\rR\n" +
 	"maxClients\x12\x1b\n" +
 	"\tdtls_port\x18\n" +
-	" \x01(\rR\bdtlsPortBd\n" +
+	" \x01(\rR\bdtlsPort\x12\x16\n" +
+	"\x06routes\x18\v \x03(\tR\x06routesBd\n" +
 	"\x1acom.xray.proxy.openconnectP\x01Z+github.com/xtls/xray-core/proxy/openconnect\xaa\x02\x16Xray.Proxy.OpenConnectb\x06proto3"
 
 var (

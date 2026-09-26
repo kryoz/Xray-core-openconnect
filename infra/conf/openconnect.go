@@ -15,6 +15,7 @@ type OpenConnectConfig struct {
 	Users         []OpenConnectUserConfig `json:"users"`
 	Subnet        string                  `json:"subnet"`
 	DNS           []string                `json:"dns,omitempty"`
+	Routes        []string                `json:"routes,omitempty"`
 	MTU           uint32                  `json:"mtu"`
 	DPD           uint32                  `json:"dpd"`
 	CookieTimeout uint32                  `json:"cookieTimeout"`
@@ -36,6 +37,7 @@ func (c *OpenConnectConfig) Build() (proto.Message, error) {
 	}
 	config.Subnet = c.Subnet
 	config.Dns = c.DNS
+	config.Routes = c.Routes
 	config.Mtu = c.MTU
 	config.Dpd = c.DPD
 	config.CookieTimeout = c.CookieTimeout

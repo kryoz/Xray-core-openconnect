@@ -78,3 +78,16 @@ func TestWriteHTTPConnectEmptyBody(t *testing.T) {
 		t.Errorf("bad status line: %q", s)
 	}
 }
+
+func TestWriteHTTPMultiValueHeaders(t *testing.T) {
+	var buf bytes.Buffer
+	hdrs := map[string][]string{"X-CSTP-Split-Include": {"10.0.0.0/8", "192.168.0.0/16"}}
+	if err := writeHTTP(&buf, 200, "", hdrs, ""); err != nil {
+		t.Fatalf("writeHTTP: %v", err)
+	}
+	s := buf.String()
+	want := "X-CSTP-Split-Include: 10.0.0.0/8\r\nX-CSTP-Split-Include: 192.168.0.0/16\r\n"
+	if !strings.Contains(s, want) {
+		t.Errorf("repeated header lines missing, got:\n%s", s)
+	}
+}

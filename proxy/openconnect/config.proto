@@ -30,4 +30,8 @@ message OpenConnectInboundConfig {
   uint32 max_clients = 9;
   // UDP (DTLS) listen port. 0 = same as the TCP listen port.
   uint32 dtls_port = 10;
+  // Split-routing networks (IPv4 CIDR) advertised to the client as
+  // X-CSTP-Split-Include. When set, the client routes only these networks
+  // through the tunnel instead of pulling its default route.
+  repeated string routes = 11;
 }
