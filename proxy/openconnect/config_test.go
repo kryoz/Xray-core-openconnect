@@ -88,6 +88,11 @@ func TestValidate(t *testing.T) {
 	if err := c.validate(); err == nil {
 		t.Error("expected error for bad static ip")
 	}
+	c = validConfig(t)
+	c.Users[0].Ip = "10.66.0.1"
+	if err := c.validate(); err == nil {
+		t.Error("expected error for static ip on the gateway address")
+	}
 
 	c = validConfig(t)
 	c.Routes = []string{"10.0.0.0/8", "192.168.1.0/24"}
@@ -103,6 +108,44 @@ func TestValidate(t *testing.T) {
 	c.Routes = []string{"fd00::/8"}
 	if err := c.validate(); err == nil {
 		t.Error("expected error for IPv6 route")
+	}
+
+	c = validConfig(t)
+	c.Users[0].Routes = []string{"172.16.10.0/24"}
+	if err := c.validate(); err != nil {
+		t.Errorf("user routes should be accepted: %v", err)
+	}
+	c.Users[0].Routes = []string{"bogus"}
+	if err := c.validate(); err == nil {
+		t.Error("expected error for bad user route")
+	}
+	c.Users[0].Routes = []string{"fd00::/8"}
+	if err := c.validate(); err == nil {
+		t.Error("expected error for IPv6 user route")
+	}
+
+	c = validConfig(t)
+	c.Groups = []*Group{{Name: "split", Routes: []string{"10.0.0.0/8"}}}
+	c.Users[0].Group = "split"
+	if err := c.validate(); err != nil {
+		t.Errorf("route group should be accepted: %v", err)
+	}
+	c.Groups[0].Name = ""
+	if err := c.validate(); err == nil {
+		t.Error("expected error for empty group name")
+	}
+	c.Groups = append(c.Groups, &Group{Name: "split"})
+	if err := c.validate(); err == nil {
+		t.Error("expected error for duplicate group name")
+	}
+	c.Groups = []*Group{{Name: "split", Routes: []string{"bogus"}}}
+	if err := c.validate(); err == nil {
+		t.Error("expected error for bad group route")
+	}
+	c.Groups = []*Group{{Name: "split"}}
+	c.Users[0].Group = "nope"
+	if err := c.validate(); err == nil {
+		t.Error("expected error for unknown user group")
 	}
 
 	c = validConfig(t)

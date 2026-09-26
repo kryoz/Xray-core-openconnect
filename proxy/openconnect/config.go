@@ -66,6 +66,26 @@ func (c *OpenConnectInboundConfig) validate() error {
 	if (c.CertFile == "") != (c.KeyFile == "") {
 		return errors.New("certFile and keyFile must both be set or both empty").AtError()
 	}
+	for _, ns := range c.Dns {
+		if _, err := netip.ParseAddr(ns); err != nil {
+			return errors.New("invalid dns server: ", ns).Base(err).AtError()
+		}
+	}
+	groupNames := make(map[string]struct{}, len(c.Groups))
+	for _, g := range c.Groups {
+		if g.Name == "" {
+			return errors.New("route group name must not be empty").AtError()
+		}
+		if _, dup := groupNames[g.Name]; dup {
+			return errors.New("duplicate route group: ", g.Name).AtError()
+		}
+		for _, r := range g.Routes {
+			if err := validateRoute(r); err != nil {
+				return errors.New("route group ", g.Name, ": ").Base(err).AtError()
+			}
+		}
+		groupNames[g.Name] = struct{}{}
+	}
 	seen := make(map[string]struct{}, len(c.Users))
 	staticIPs := make(map[netip.Addr]string, len(c.Users))
 	for _, u := range c.Users {
@@ -90,19 +110,28 @@ func (c *OpenConnectInboundConfig) validate() error {
 			if ip == prefix.Addr() || ip == ipv4Broadcast(prefix) {
 				return errors.New("user ", u.Name, ": static ip ", u.Ip, " is a network/broadcast address").AtError()
 			}
+			if ip == firstHost(prefix) {
+				return errors.New("user ", u.Name, ": static ip ", u.Ip, " is the gateway/DNS address of the subnet").AtError()
+			}
 			if other, dup := staticIPs[ip]; dup {
 				return errors.New("duplicate static ip ", u.Ip, " for users ", other, " and ", u.Name).AtError()
 			}
 			staticIPs[ip] = u.Name
 		}
+		for _, r := range u.Routes {
+			if err := validateRoute(r); err != nil {
+				return errors.New("user ", u.Name, ": ").Base(err).AtError()
+			}
+		}
+		if u.Group != "" {
+			if _, ok := groupNames[u.Group]; !ok {
+				return errors.New("user ", u.Name, ": unknown route group: ", u.Group).AtError()
+			}
+		}
 	}
 	for _, r := range c.Routes {
-		p, err := netip.ParsePrefix(r)
-		if err != nil {
-			return errors.New("invalid route (want IPv4 CIDR): ", r).Base(err).AtError()
-		}
-		if !p.Addr().Is4() {
-			return errors.New("route must be IPv4: ", r).AtError()
+		if err := validateRoute(r); err != nil {
+			return err
 		}
 	}
 	// The camouflage secret is matched against the raw query string, so it
@@ -117,6 +146,54 @@ func (c *OpenConnectInboundConfig) validate() error {
 		return errors.New("mtu out of range [", MinMTU, ",", MaxMTU, "]: ", c.Mtu).AtError()
 	}
 	return nil
+}
+
+// routesFor resolves the split-routing networks for a user's session:
+// group routes first, then the user's own routes, each network advertised
+// as its own X-CSTP-Split-Include line. A user with neither falls back to
+// the inbound-level routes; still none means a full tunnel (no headers).
+// Duplicate CIDRs across group and user are left as-is: a repeated route
+// line is harmless to the client.
+func (c *OpenConnectInboundConfig) routesFor(u *User) []string {
+	if u == nil {
+		return c.Routes
+	}
+	var out []string
+	if u.Group != "" {
+		for _, g := range c.Groups {
+			if g.Name == u.Group {
+				out = append(out, g.Routes...)
+				break
+			}
+		}
+	}
+	if len(u.Routes) > 0 {
+		out = append(out, u.Routes...)
+	}
+	if len(out) == 0 {
+		return c.Routes
+	}
+	return out
+}
+
+// validateRoute checks one split-routing network: IPv4 CIDR.
+func validateRoute(r string) error {
+	p, err := netip.ParsePrefix(r)
+	if err != nil {
+		return errors.New("invalid route (want IPv4 CIDR): ", r).Base(err).AtError()
+	}
+	if !p.Addr().Is4() {
+		return errors.New("route must be IPv4: ", r).AtError()
+	}
+	return nil
+}
+
+// firstHost returns the first host address of an IPv4 prefix (base+1),
+// reserved for the gateway/DNS. The caller must ensure the prefix is IPv4.
+func firstHost(p netip.Prefix) netip.Addr {
+	a4 := p.Masked().Addr().As4()
+	a4[3]++
+	return netip.AddrFrom4(a4)
 }
 
 // ipv4Broadcast returns the broadcast address of an IPv4 prefix. The caller

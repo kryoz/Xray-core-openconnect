@@ -5,13 +5,17 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	stderrors "errors"
 
 	"github.com/xtls/xray-core/common/errors"
 )
@@ -19,8 +23,6 @@ import (
 const (
 	// authTimeout bounds how long a control connection may idle during auth.
 	authTimeout = 240 * time.Second
-	// fallbackTimeout bounds the idle CSTP-fallback TCP connection after CONNECT.
-	fallbackTimeout = 10 * time.Minute
 	// dataMTUOverhead approximates UDP+IP overhead subtracted from the base MTU.
 	dataMTUOverhead = 20
 	// dtlsOverhead conservatively covers the DTLS record header + AEAD tag +
@@ -28,7 +30,8 @@ const (
 	// clamped to baseMTU - dtlsOverhead so outgoing IP packets always fit the
 	// DTLS tunnel (the client's own data MTU is a few bytes larger).
 	dtlsOverhead = 80
-	// cstpKeepalive is the keepalive interval advertised to the client.
+	// cstpKeepalive is the keepalive interval advertised to the client and
+	// used by the server-side CSTP keepalive timer (cstpPump).
 	cstpKeepalive = 10
 	// gcInterval is how often the session sweeper reaps expired sessions.
 	gcInterval = 30 * time.Second
@@ -61,6 +64,11 @@ func (s *Server) acceptLoop() {
 	for {
 		raw, err := s.tcpLn.Accept()
 		if err != nil {
+			// A transient error (e.g. EMFILE) must not disappear silently:
+			// the control channel is down until the process restarts.
+			if !stderrors.Is(err, net.ErrClosed) {
+				errors.LogError(s.ctx, "openconnect: TCP accept loop stopped: ", err)
+			}
 			return
 		}
 		go s.handleControl(raw)
@@ -83,6 +91,16 @@ func (s *Server) handleControl(raw net.Conn) {
 		KeyLogWriter: kl,
 		MinVersion:   tls.VersionTLS12,
 		MaxVersion:   tls.VersionTLS12,
+		// SHA-256-PRF suites only: the DTLS PSK is derived via the RFC 5705
+		// exporter, whose PRF is the negotiated suite's — derivePSK12 hardcodes
+		// P_SHA256, so a SHA-384 suite would silently desync the PSK and push
+		// every such client onto the TCP fallback.
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+		},
 	})
 	if err := tc.HandshakeContext(s.ctx); err != nil {
 		errors.LogDebug(s.ctx, fmt.Sprintf("openconnect: TLS handshake from %s failed: %s", peer, err))
@@ -95,6 +113,10 @@ func (s *Server) handleControl(raw net.Conn) {
 	// any bytes the reader buffered past the current request.
 	br := bufio.NewReaderSize(tc, 8192)
 	var camoOK bool // camouflage passed on this connection (secret or cookie)
+	// pendingUser is connection-local: the username and password POSTs arrive
+	// on the same TLS connection, so the staged name lives here — not in a
+	// server-wide map keyed by peer IP — and dies with the connection.
+	var pendingUser string
 	for {
 		tc.SetReadDeadline(time.Now().Add(authTimeout))
 		req, err := readHTTP(br)
@@ -113,7 +135,7 @@ func (s *Server) handleControl(raw net.Conn) {
 				return
 			}
 		}
-		done := s.dispatch(tc, req, peerIP, kl)
+		done := s.dispatch(tc, br, req, peerIP, kl, &pendingUser)
 		if done {
 			return
 		}
@@ -135,15 +157,15 @@ func (s *Server) rejectCamouflage(tc *tls.Conn) {
 
 // dispatch routes one control request. It returns true when the connection's
 // control phase is over (e.g. after CONNECT, which keeps the socket open).
-func (s *Server) dispatch(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLog) bool {
+func (s *Server) dispatch(tc *tls.Conn, br *bufio.Reader, req *httpReq, peerIP string, kl *keyLog, pending *string) bool {
 	switch {
 	case (req.method == "GET" || req.method == "POST") && (req.path == "/" || req.path == "/index.html"):
 		// ocserv answers both GET / and the client's initial POST / with the login form.
 		_ = writeHTTP(tc, 200, "text/xml; charset=utf-8", nil, loginForm)
 	case req.method == "POST" && req.path == "/auth":
-		s.handleAuth(tc, req, peerIP, kl)
+		s.handleAuth(tc, req, peerIP, kl, pending)
 	case req.method == "CONNECT":
-		s.handleConnect(tc, req, kl)
+		s.handleConnect(tc, br, req, kl)
 		return true
 	default:
 		_ = writeHTTP(tc, 404, "text/plain", nil, "not found")
@@ -151,7 +173,7 @@ func (s *Server) dispatch(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLog)
 	return false
 }
 
-func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLog) {
+func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLog, pending *string) {
 	if s.limiter.blocked(peerIP) {
 		_ = writeHTTP(tc, 401, "text/xml; charset=utf-8", nil, failMsg)
 		return
@@ -159,7 +181,13 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLo
 	vals := parseForm(req.body)
 
 	if u, ok := vals["username"]; ok {
-		s.setPendingUser(peerIP, u)
+		// User names are short by construction; reject pathologically long
+		// ones outright instead of carrying them around.
+		if len(u) > 255 {
+			_ = writeHTTP(tc, 401, "text/xml; charset=utf-8", nil, failMsg)
+			return
+		}
+		*pending = u
 		_ = writeHTTP(tc, 200, "text/xml; charset=utf-8", nil, passwdForm)
 		return
 	}
@@ -170,7 +198,7 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLo
 		return
 	}
 
-	user := s.takePendingUser(peerIP)
+	user := *pending
 	if user == "" || !s.users.check(user, pw) {
 		s.limiter.recordFailure(peerIP)
 		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: auth failed for %q from %s", user, peerIP))
@@ -216,7 +244,7 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLo
 	_ = writeHTTP(tc, 200, "text/xml; charset=utf-8", map[string][]string{"Set-Cookie": {cookies}}, successMsg)
 }
 
-func (s *Server) handleConnect(tc *tls.Conn, req *httpReq, kl *keyLog) {
+func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq, kl *keyLog) {
 	sess := s.sessFromCookie(req.headers["cookie"])
 	if sess == nil {
 		_ = writeHTTP(tc, 401, "text/plain", nil, "unauthorized")
@@ -243,21 +271,180 @@ func (s *Server) handleConnect(tc *tls.Conn, req *httpReq, kl *keyLog) {
 	// ocserv sends NO body after the blank line; the client reads the rest as
 	// tunnel data. The TCP connection then stays open as the CSTP fallback.
 	_ = writeHTTP(tc, 200, "", s.connectHeaders(sess), "")
-	s.keepOpen(tc)
-	sess.markDisconnected()
+	s.cstpPump(sess, tc, br)
 }
 
-// keepOpen holds the connection open as the CSTP fallback channel, discarding
-// data, until the client closes it or it idles past fallbackTimeout.
-// ponytail: discards CSTP/TCP-fallback traffic; real TCP fallback lands in Phase 4.
-func (s *Server) keepOpen(tc *tls.Conn) {
-	buf := make([]byte, 4096)
+// cstpPump runs the CSTP/TCP channel after CONNECT. It parses STF-framed
+// packets, feeds DATA into the device (for clients without DTLS — CGNAT with
+// UDP blocked — this is the only data path), answers DPD, and mirrors the DTLS
+// liveness machine over TCP: AC_PKT_KEEPALIVE every cstpKeepalive seconds of
+// idle, AC_PKT_DPD_OUT after dpd seconds, teardown after 2×dpd without any
+// frame (ocserv src/worker-vpn.c timers).
+func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
+	// The device writer (gVisor goroutine) and the keepalive/DPD timers below
+	// both write to the TLS connection; crypto/tls does not document
+	// concurrent Write as safe, so serialize frames here.
+	var wmu sync.Mutex
+	writeFrame := func(typ byte, payload []byte) error {
+		f := make([]byte, 8+len(payload))
+		copy(f, "STF\x01")
+		binary.BigEndian.PutUint16(f[4:6], uint16(len(payload)))
+		f[6] = typ
+		copy(f[8:], payload)
+		wmu.Lock()
+		defer wmu.Unlock()
+		_, err := tc.Write(f)
+		return err
+	}
+	deviceWriter := func(framed []byte) error { // device contract: [acPKTData]+ip
+		return writeFrame(acPKTData, framed[1:])
+	}
+
+	// Own the device writer unless DTLS already took it over; when DTLS later
+	// tears down, teardownDTLS falls back to this writer. The token is kept
+	// in sess.dtlsWriter — the single "current registration" slot — so every
+	// takeover (DTLS start, CSTP-DATA steal, DTLS-teardown handback) and this
+	// defer remove exactly the entry that is live.
+	sess.mu.Lock()
+	sess.cstpWrite = deviceWriter
+	if sess.dtlsConn == nil {
+		sess.dtlsWriter = s.device.register(sess.ip, deviceWriter)
+	}
+	sess.mu.Unlock()
+	defer func() {
+		sess.mu.Lock()
+		sess.cstpWrite = nil
+		if sess.dtlsConn == nil {
+			s.device.unregisterIf(sess.ip, sess.dtlsWriter)
+			sess.dtlsWriter = nil
+			sess.connected = false
+			sess.lastDisc = time.Now()
+		}
+		sess.mu.Unlock()
+	}()
+
+	ka := time.Duration(cstpKeepalive) * time.Second
+	dpd := time.Duration(s.dpdSecs()) * time.Second
+	buf := make([]byte, 65536)
+	lastRead := time.Now()
+	from := sess.ip
 	for {
-		tc.SetReadDeadline(time.Now().Add(fallbackTimeout))
-		if _, err := tc.Read(buf); err != nil {
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+		}
+		tc.SetReadDeadline(time.Now().Add(ka))
+		typ, payload, err := readCSTPFrame(tc, br, buf)
+		if err != nil {
+			if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+				switch idle := time.Since(lastRead); {
+				case idle >= 2*dpd:
+					errors.LogInfo(s.ctx, "openconnect: CSTP DPD timeout for ", sess.ip)
+					return
+				case idle >= dpd:
+					_ = writeFrame(acPKTDPDOut, nil)
+				default:
+					_ = writeFrame(acPKTKeepalive, nil)
+				}
+				continue
+			}
+			if err != io.EOF {
+				errors.LogInfo(s.ctx, "openconnect: CSTP read error for ", sess.ip, ": ", err)
+			}
+			return
+		}
+		lastRead = time.Now()
+		switch typ {
+		case acPKTData:
+			if len(payload) == 0 || len(payload) > int(s.mtu()) {
+				errors.LogWarning(s.ctx, "openconnect: dropping bad data frame from ", sess.ip, " (", len(payload), " bytes)")
+				continue
+			}
+			// Data over TCP while a DTLS tunnel is registered means the
+			// client fell back to CSTP (resume without DTLS, UDP black-holed)
+			// and no longer reads its DTLS socket: take the device writer
+			// back or the tunnel keeps draining relayed packets into it.
+			sess.mu.Lock()
+			if stale := sess.dtlsConn; stale != nil {
+				sess.dtlsConn = nil
+				sess.dtlsWriter = s.device.register(sess.ip, deviceWriter)
+				sess.mu.Unlock()
+				stale.Close()
+				errors.LogInfo(s.ctx, "openconnect: CSTP data with live DTLS for ", sess.ip, ", falling back to CSTP writer")
+			} else {
+				sess.mu.Unlock()
+			}
+			// Copy once into a frame [acPKTData]+IP the L3 relay can hand to
+			// the peer tunnel as-is.
+			frame := make([]byte, 1+len(payload))
+			frame[0] = acPKTData
+			copy(frame[1:], payload)
+			select {
+			case s.device.rxCh <- ocRxPkt{from: from, frame: frame}:
+			default:
+			}
+		case acPKTDPDOut:
+			_ = writeFrame(acPKTDPDResp, nil)
+		case acPKTDPDResp, acPKTKeepalive:
+			// liveness only; lastRead already recorded
+		case acPKTDisconnect, acPKTTerm:
+			return
+		default:
+			errors.LogInfo(s.ctx, "openconnect: unknown CSTP frame type ", typ, " from ", sess.ip)
 			return
 		}
 	}
+}
+
+// readCSTPFrame reads one STF-framed CSTP packet from the TLS stream. The
+// 8-byte header ("STF\x1", big-endian payload length, type, reserved zero)
+// exists only over TCP; DTLS uses bare 1-byte types. A read deadline that
+// fires before the first byte of the frame arrives is returned as a timeout
+// error so the caller can run its keepalive/DPD timers; a timeout or garbage
+// mid-frame returns a non-timeout error — the stream cannot be resynced, so
+// the connection is torn down.
+func readCSTPFrame(tc *tls.Conn, br *bufio.Reader, buf []byte) (byte, []byte, error) {
+	started := false
+	read := func(p []byte) error {
+		for len(p) > 0 {
+			n, err := br.Read(p)
+			p = p[n:]
+			if n > 0 {
+				started = true
+			}
+			if err != nil {
+				if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+					if br.Buffered() > 0 {
+						continue // buffered bytes remain; the deadline does not apply
+					}
+					if started {
+						return fmt.Errorf("stalled mid-frame: %w", err)
+					}
+				}
+				return err
+			}
+		}
+		return nil
+	}
+	var hdr [8]byte
+	if err := read(hdr[:]); err != nil {
+		return 0, nil, err
+	}
+	if string(hdr[:4]) != "STF\x01" || hdr[7] != 0 {
+		return 0, nil, errors.New("malformed CSTP frame header").AtError()
+	}
+	n := int(binary.BigEndian.Uint16(hdr[4:6]))
+	if n > len(buf) {
+		return 0, nil, errors.New("oversized CSTP frame: ", n).AtError()
+	}
+	if n == 0 {
+		return hdr[6], nil, nil
+	}
+	if err := read(buf[:n]); err != nil {
+		return 0, nil, err
+	}
+	return hdr[6], buf[:n], nil
 }
 
 // gcLoop periodically reaps disconnected sessions whose resume window elapsed,
@@ -278,14 +465,8 @@ func (s *Server) gcLoop() {
 }
 
 func (s *Server) connectHeaders(sess *ocSession) map[string][]string {
-	baseMTU := s.conf.Mtu
-	if baseMTU == 0 {
-		baseMTU = DefaultMTU
-	}
-	dpd := s.conf.Dpd
-	if dpd == 0 {
-		dpd = DefaultDPD
-	}
+	baseMTU := s.mtu()
+	dpd := s.dpdSecs()
 	udpPort := int(s.src.Port)
 	if s.conf.DtlsPort != 0 {
 		udpPort = int(s.conf.DtlsPort)
@@ -307,7 +488,10 @@ func (s *Server) connectHeaders(sess *ocSession) map[string][]string {
 	}
 	// Split routing: each network is a separate repeated header line, as the
 	// client (libopenconnect/vpnc-script) collects routes per header line.
-	hdrs["X-CSTP-Split-Include"] = append(hdrs["X-CSTP-Split-Include"], s.conf.Routes...)
+	// Per-user/group routes override the inbound policy; empty inherits it.
+	if routes := s.conf.routesFor(sess.user); len(routes) > 0 {
+		hdrs["X-CSTP-Split-Include"] = routes
+	}
 	// No X-DTLS-Content-Encoding: ocserv omits it when compression is off.
 	return hdrs
 }
@@ -334,23 +518,6 @@ func (s *Server) sessFromCookie(cookieHdr string) *ocSession {
 	var key [32]byte
 	copy(key[:], sid)
 	return s.registry.getBySID(key)
-}
-
-func (s *Server) setPendingUser(peerIP, user string) {
-	s.pendingMu.Lock()
-	s.pendingUser[peerIP] = user
-	s.pendingMu.Unlock()
-}
-
-// takePendingUser returns and removes the username staged for the client IP.
-// It is consumed exactly once, at the password step, so a stale username can
-// never be replayed by a later password-only POST from the same IP.
-func (s *Server) takePendingUser(peerIP string) string {
-	s.pendingMu.Lock()
-	defer s.pendingMu.Unlock()
-	u := s.pendingUser[peerIP]
-	delete(s.pendingUser, peerIP)
-	return u
 }
 
 func (s *Server) cookieTimeoutSecs() uint32 {

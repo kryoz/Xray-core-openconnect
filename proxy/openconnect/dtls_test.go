@@ -1,9 +1,53 @@
 package openconnect
 
 import (
+	"net"
 	"net/netip"
 	"testing"
+	"time"
 )
+
+// TestSessionConnWritesToReboundAddr covers the NAT-rebinding write target:
+// pion/dtls caches the handshake-time peer address and never re-learns it
+// without Connection IDs, so sessionConn.WriteTo must write to the pipe's
+// current address (curAddr), not the stale one pion passes in.
+func TestSessionConnWritesToReboundedAddr(t *testing.T) {
+	oldAddr := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1111}
+	newAddr := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 2222}
+	ln := &fakePacketConn{}
+	pipe := newOCPipe(oldAddr)
+	sc := &sessionConn{pipe: pipe, ln: ln}
+
+	if _, err := sc.WriteTo([]byte("x"), oldAddr); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if ln.addr.String() != oldAddr.String() {
+		t.Fatalf("initial write went to %v, want %v", ln.addr, oldAddr)
+	}
+
+	pipe.addr.Store(newAddr) // NAT rebind
+	if _, err := sc.WriteTo([]byte("x"), oldAddr); err != nil {
+		t.Fatalf("write after rebind: %v", err)
+	}
+	if ln.addr.String() != newAddr.String() {
+		t.Fatalf("write after rebind went to %v, want %v", ln.addr, newAddr)
+	}
+}
+
+type fakePacketConn struct {
+	addr net.Addr
+}
+
+func (f *fakePacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	f.addr = addr
+	return len(b), nil
+}
+func (f *fakePacketConn) ReadFrom([]byte) (int, net.Addr, error) { return 0, nil, nil }
+func (f *fakePacketConn) Close() error                           { return nil }
+func (f *fakePacketConn) LocalAddr() net.Addr                    { return nil }
+func (f *fakePacketConn) SetDeadline(time.Time) error            { return nil }
+func (f *fakePacketConn) SetReadDeadline(time.Time) error        { return nil }
+func (f *fakePacketConn) SetWriteDeadline(time.Time) error       { return nil }
 
 // buildClientHello constructs a minimal DTLS 1.2 ClientHello with the given
 // session_id and trailing extensions bytes (the record/handshake length fields
@@ -74,7 +118,9 @@ func TestIsDTLSClientHello(t *testing.T) {
 }
 
 func TestIPPool(t *testing.T) {
-	p, err := newIPPool("10.66.0.0/30") // 2 usable addresses
+	// /30: one dynamic address — network, gateway (base+1) and broadcast
+	// are skipped by the pool.
+	p, err := newIPPool("10.66.0.0/30")
 	if err != nil {
 		t.Fatalf("newIPPool: %v", err)
 	}
@@ -82,12 +128,8 @@ func TestIPPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("alloc: %v", err)
 	}
-	a2, err := p.alloc()
-	if err != nil {
-		t.Fatalf("alloc: %v", err)
-	}
-	if a1 == a2 {
-		t.Errorf("alloc returned %s twice", a1)
+	if a1 != netip.MustParseAddr("10.66.0.2") {
+		t.Errorf("alloc returned %s, want 10.66.0.2 (gateway skipped)", a1)
 	}
 	if _, err := p.alloc(); err == nil {
 		t.Error("expected exhaustion error")
@@ -103,8 +145,8 @@ func TestIPPool(t *testing.T) {
 }
 
 func TestIPPoolReserve(t *testing.T) {
-	p, _ := newIPPool("10.66.0.0/30")
-	static := netip.MustParseAddr("10.66.0.1")
+	p, _ := newIPPool("10.66.0.0/29")
+	static := netip.MustParseAddr("10.66.0.2")
 	p.reserve(static)
 	a, err := p.alloc()
 	if err != nil {

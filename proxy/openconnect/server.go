@@ -30,12 +30,10 @@ type Server struct {
 	tag string
 	src net.Destination
 
-	cert        tls.Certificate
-	registry    *sessionRegistry
-	users       *userStore
-	limiter     *authLimiter
-	pendingMu   sync.Mutex
-	pendingUser map[string]string
+	cert     tls.Certificate
+	registry *sessionRegistry
+	users    *userStore
+	limiter  *authLimiter
 
 	stack  *ocStack
 	device *ocDevice
@@ -75,7 +73,7 @@ func NewServer(ctx context.Context, conf *OpenConnectInboundConfig) (*Server, er
 	if err != nil {
 		return nil, err
 	}
-	cert, err := loadCert(conf.CertFile, conf.KeyFile)
+	cert, err := loadCert(ctx, conf.CertFile, conf.KeyFile)
 	if err != nil {
 		return nil, err
 	}
@@ -99,9 +97,20 @@ func NewServer(ctx context.Context, conf *OpenConnectInboundConfig) (*Server, er
 	bg := core.ToBackgroundDetachedContext(ctx)
 	sCtx, cancel := context.WithCancel(bg)
 
-	stack := newOCStack(sCtx, d, inbound.Tag, dataMTUOf(conf))
+	registry := newSessionRegistry(pool)
+	stack := newOCStack(sCtx, d, inbound.Tag, dataMTUOf(conf), registry)
 	stack.device.uplinkCounter = uplinkCounter
 	stack.device.downlinkCounter = downlinkCounter
+	// Per-user stats for the L3 relay: same counter names and policy gate as
+	// the dispatcher's L4 path (WrapLink), so relayed client↔client bytes are
+	// indistinguishable from terminated ones in user>>>name>>>traffic>>>*.
+	if lp := p.ForLevel(0); lp.Stats.UserUplink || lp.Stats.UserDownlink {
+		sm := v.GetFeature(stats.ManagerType()).(stats.Manager)
+		stack.device.userCounter = func(email, dir string) stats.Counter {
+			c, _ := sm.GetOrRegisterCounter("user>>>" + email + ">>>traffic>>>" + dir)
+			return c
+		}
+	}
 	server := &Server{
 		conf:          conf,
 		ctx:           sCtx,
@@ -111,11 +120,10 @@ func NewServer(ctx context.Context, conf *OpenConnectInboundConfig) (*Server, er
 		tag:           inbound.Tag,
 		src:           inbound.Source,
 
-		cert:        cert,
-		registry:    newSessionRegistry(pool),
-		users:       users,
-		limiter:     newAuthLimiter(),
-		pendingUser: make(map[string]string),
+		cert:     cert,
+		registry: registry,
+		users:    users,
+		limiter:  newAuthLimiter(),
 
 		stack:  stack,
 		device: stack.device,

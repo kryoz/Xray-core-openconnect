@@ -4,9 +4,10 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"strings"
 	"sync"
+
+	"github.com/xtls/xray-core/common/errors"
 )
 
 // pskLabel is the exporter label used by ocserv (src/worker-vpn.c).

@@ -12,6 +12,22 @@ message User {
   string password = 2;
   // Optional static IP address assigned to this user.
   string ip = 3;
+  // Split-routing override: when non-empty, used instead of the
+  // inbound-level routes for this user's sessions.
+  repeated string routes = 4;
+  // Named route-group membership; group routes are advertised before the
+  // user's own routes. Must reference an inbound-level group by name.
+  string group = 5;
+  // L3 client-to-client reachability: IP packets whose destination is the
+  // virtual IP of another l3-marked connected user are relayed directly
+  // between their tunnels, bypassing the L4 stack and routing rules.
+  // Pairs without the flag on both sides keep the regular behavior.
+  bool l3 = 6;
+}
+// Group is a named set of split-routing networks shared by users.
+message Group {
+  string name = 1;
+  repeated string routes = 2;
 }
 
 message OpenConnectInboundConfig {
@@ -42,4 +58,6 @@ message OpenConnectInboundConfig {
   string camouflage_secret = 12;
   // Realm advertised in the 401 WWW-Authenticate header. Empty = plain 404.
   string camouflage_realm = 13;
+  // Named route groups referenced by User.group.
+  repeated Group groups = 14;
 }

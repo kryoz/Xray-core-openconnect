@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -33,10 +34,10 @@ import (
 
 const ocNIC tcpip.NICID = 1
 
-// ocRxPkt is an IP packet pulled from a client's DTLS tunnel (client→server).
+// ocRxPkt is an IP packet pulled from a client's tunnel (client→server).
 type ocRxPkt struct {
-	version byte // 4 or 6
-	payload []byte
+	from  netip.Addr // sender's virtual IP, set by the read pumps (anti-spoofing, L3 relay)
+	frame []byte     // full wire frame [acPKTData]+IP; payload = frame[1:]
 }
 
 // ocDevice is a gVisor link device that multiplexes every client's DTLS tunnel
@@ -44,12 +45,20 @@ type ocRxPkt struct {
 // WritePacket routes an outgoing IP packet to the owning client by destination
 // virtual IP (server→client).
 type ocDevice struct {
-	mtu             uint32
-	rxCh            chan ocRxPkt
-	closed          chan struct{}
-	once            sync.Once
-	mu              sync.Mutex
-	tunnels         map[string]func([]byte) error // virtual IP → framed writer
+	mtu    uint32
+	rxCh   chan ocRxPkt
+	closed chan struct{}
+	once   sync.Once
+	// RWMutex: tunnels is read on every downlink/relay packet (WritePacket,
+	// relayL3) but written only on session connect/disconnect/teardown, so
+	// readers must not serialize each other.
+	mu      sync.RWMutex
+	tunnels map[netip.Addr]*ocWriter // virtual IP → framed writer token
+	// registry enables the L3 client↔client relay (nil = relay disabled);
+	// userCounter attributes relayed bytes to user>>>name>>>traffic counters,
+	// mirroring the dispatcher's L4 path (nil = per-user stats off).
+	registry        *sessionRegistry
+	userCounter     func(email, dir string) stats.Counter
 	uplinkCounter   stats.Counter
 	downlinkCounter stats.Counter
 }
@@ -59,19 +68,33 @@ func newOCDevice(mtu uint32) *ocDevice {
 		mtu:     mtu,
 		rxCh:    make(chan ocRxPkt, 512),
 		closed:  make(chan struct{}),
-		tunnels: make(map[string]func([]byte) error),
+		tunnels: make(map[netip.Addr]*ocWriter),
 	}
 }
 
-func (d *ocDevice) register(virtIP string, w func([]byte) error) {
-	d.mu.Lock()
-	d.tunnels[virtIP] = w
-	d.mu.Unlock()
+// ocWriter wraps one framed writer with an identity, so unregisterIf can tell
+// a stale session's writer from the live one occupying the same virtual IP.
+type ocWriter struct {
+	f func([]byte) error
 }
 
-func (d *ocDevice) unregister(virtIP string) {
+func (d *ocDevice) register(virtIP netip.Addr, w func([]byte) error) *ocWriter {
+	t := &ocWriter{f: w}
 	d.mu.Lock()
-	delete(d.tunnels, virtIP)
+	d.tunnels[virtIP] = t
+	d.mu.Unlock()
+	return t
+}
+
+// unregisterIf removes the tunnel writer only when it is still the one being
+// unregistered: two sessions of one user may share a static virtual IP, and a
+// stale session's teardown must not steal the live session's writer. A nil
+// token is a no-op (nothing in the map is ever nil).
+func (d *ocDevice) unregisterIf(virtIP netip.Addr, w *ocWriter) {
+	d.mu.Lock()
+	if d.tunnels[virtIP] == w {
+		delete(d.tunnels, virtIP)
+	}
 	d.mu.Unlock()
 }
 
@@ -81,71 +104,130 @@ func (d *ocDevice) close() {
 
 // ReadPacket implements the device read path (client→server).
 func (d *ocDevice) ReadPacket() (byte, *stack.PacketBuffer, error) {
-	select {
-	case <-d.closed:
-		return 0, nil, io.EOF
-	case p := <-d.rxCh:
-		if d.uplinkCounter != nil {
-			d.uplinkCounter.Add(int64(len(p.payload)))
+	for {
+		select {
+		case <-d.closed:
+			return 0, nil, io.EOF
+		case p := <-d.rxCh:
+			if d.relayL3(p) {
+				continue
+			}
+			payload := p.frame[1:]
+			if d.uplinkCounter != nil {
+				d.uplinkCounter.Add(int64(len(payload)))
+			}
+			pb := stack.NewPacketBuffer(stack.PacketBufferOptions{
+				ReserveHeaderBytes: header.IPv4MinimumSize,
+				Payload:            buffer.MakeWithData(payload),
+			})
+			return payload[0] >> 4, pb, nil
 		}
-		pb := stack.NewPacketBuffer(stack.PacketBufferOptions{
-			ReserveHeaderBytes: header.IPv4MinimumSize,
-			Payload:            buffer.MakeWithData(p.payload),
-		})
-		return p.version, pb, nil
 	}
 }
 
 // WritePacket implements the device write path (server→client).
 func (d *ocDevice) WritePacket(packet *stack.PacketBuffer) tcpip.Error {
 	// AsSlices() yields the complete packet including IP/UDP headers; Data()
-	// would only cover the payload and lose the destination address.
-	payload := make([]byte, 0, int(packet.Size()))
+	// would only cover the payload and lose the destination address. One
+	// allocation builds the framed [acPKTData]+IP record the tunnel writer
+	// consumes — the hottest downlink path.
+	framed := make([]byte, 1+int(packet.Size()))
+	framed[0] = acPKTData
+	off := 1
 	for _, s := range packet.AsSlices() {
-		payload = append(payload, s...)
+		off += copy(framed[off:], s)
 	}
-	destIP := ocDestIP(payload)
-	if destIP == "" {
+	framed = framed[:off]
+	destIP := ocDestIP(framed[1:])
+	if !destIP.IsValid() {
 		return nil
 	}
-	d.mu.Lock()
+	d.mu.RLock()
 	w, ok := d.tunnels[destIP]
-	d.mu.Unlock()
+	d.mu.RUnlock()
 	if !ok {
 		return nil // drop: no tunnel for this destination
 	}
-	framed := make([]byte, 1+len(payload))
-	framed[0] = acPKTData
-	copy(framed[1:], payload)
-	if err := w(framed); err != nil {
+	if err := w.f(framed); err != nil {
 		return &tcpip.ErrAborted{}
 	}
 	if d.downlinkCounter != nil {
-		d.downlinkCounter.Add(int64(len(payload)))
+		d.downlinkCounter.Add(int64(len(framed) - 1))
 	}
 	return nil
 }
 
+// relayL3 relays an IP packet between two l3-marked users straight from the
+// sender's tunnel to the destination client's tunnel, bypassing the gVisor
+// stack: no L4 demux, no routing.Dispatcher, TCP/UDP/ICMP treated identically.
+// TTL is not decremented (single userspace hop, no loop is possible).
+// It reports whether the packet was consumed (relayed, or dropped as spoofed);
+// false lets it take the regular stack path, byte-identical to a non-l3 pair.
+func (d *ocDevice) relayL3(p ocRxPkt) bool {
+	// One atomic load fast-path: deployments without L3 users never pay the
+	// destination-IP parse or the registry lookups.
+	if d.registry == nil || !d.registry.anyL3.Load() {
+		return false
+	}
+	dst := ocDestIP(p.frame[1:])
+	if !dst.IsValid() || dst == p.from {
+		return false
+	}
+	dstSess := d.registry.getByVirtIP(dst)
+	if dstSess == nil || dstSess.user == nil || !dstSess.user.L3 {
+		return false
+	}
+	srcSess := d.registry.getByVirtIP(p.from)
+	if srcSess == nil || srcSess.user == nil || !srcSess.user.L3 {
+		return false
+	}
+	if ocSrcIP(p.frame[1:]) != p.from {
+		return true // spoofed source: drop
+	}
+	d.mu.RLock()
+	w := d.tunnels[dst]
+	d.mu.RUnlock()
+	if w == nil {
+		return false // destination session exists but is not connected: regular path
+	}
+	// p.frame is already [acPKTData]+IP: hand it over as-is, no copy.
+	if err := w.f(p.frame); err != nil {
+		return true // tunnel writer died with its tunnel; drop
+	}
+	if d.uplinkCounter != nil {
+		d.uplinkCounter.Add(int64(len(p.frame) - 1))
+	}
+	if d.downlinkCounter != nil {
+		d.downlinkCounter.Add(int64(len(p.frame) - 1))
+	}
+	if d.userCounter != nil {
+		if c := d.userCounter(srcSess.user.Name, "uplink"); c != nil {
+			c.Add(int64(len(p.frame) - 1))
+		}
+		if c := d.userCounter(dstSess.user.Name, "downlink"); c != nil {
+			c.Add(int64(len(p.frame) - 1))
+		}
+	}
+	return true
+}
+
 func (d *ocDevice) Wait() {}
 
-// ocDestIP extracts the destination IP (dotted/hex string) from an IP packet.
-func ocDestIP(payload []byte) string {
-	if len(payload) < 4 {
-		return ""
+// ocDestIP extracts the destination IP from an IP packet. The zero netip.Addr
+// (IsValid()==false) means "not parseable" — netip keys avoid the per-packet
+// string allocation of net.IP(...).String().
+func ocDestIP(payload []byte) netip.Addr {
+	if len(payload) >= 20 && payload[0]>>4 == 4 {
+		var a [4]byte
+		copy(a[:], payload[16:20])
+		return netip.AddrFrom4(a)
 	}
-	switch payload[0] >> 4 {
-	case 4:
-		if len(payload) < 20 {
-			return ""
-		}
-		return net.IP(payload[16:20]).String()
-	case 6:
-		if len(payload) < 40 {
-			return ""
-		}
-		return net.IP(payload[24:40]).String()
+	if len(payload) >= 40 && payload[0]>>4 == 6 {
+		var a [16]byte
+		copy(a[:], payload[24:40])
+		return netip.AddrFrom16(a)
 	}
-	return ""
+	return netip.Addr{}
 }
 
 // ocLinkEndpoint adapts ocDevice to the gVisor stack.LinkEndpoint interface.
@@ -200,6 +282,21 @@ func (e *ocLinkEndpoint) Close() {
 	e.Attach(nil)
 }
 
+// ocSrcIP extracts the source IP from an IP packet.
+func ocSrcIP(payload []byte) netip.Addr {
+	if len(payload) >= 20 && payload[0]>>4 == 4 {
+		var a [4]byte
+		copy(a[:], payload[12:16])
+		return netip.AddrFrom4(a)
+	}
+	if len(payload) >= 40 && payload[0]>>4 == 6 {
+		var a [16]byte
+		copy(a[:], payload[8:24])
+		return netip.AddrFrom16(a)
+	}
+	return netip.Addr{}
+}
+
 func (e *ocLinkEndpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Error) {
 	var n int
 	for _, pb := range list.AsSlice() {
@@ -245,6 +342,7 @@ type ocHandler struct {
 	ctx        context.Context
 	dispatcher routing.Dispatcher
 	tag        string
+	registry   *sessionRegistry
 }
 
 // HandleConnection dispatches one gVisor-demuxed TCP/UDP flow.
@@ -266,6 +364,14 @@ func (h *ocHandler) HandleConnection(conn net.Conn, destination xnet.Destination
 		Tag:    h.tag,
 		Source: source,
 		User:   &protocol.MemoryUser{},
+	}
+	// Attribute the flow to the authenticated session's user so the
+	// dispatcher's standard per-user stats (user>>>email>>>traffic/online)
+	// apply, exactly like the regular inbounds.
+	if vip, ok := netip.AddrFromSlice(source.Address.IP()); ok {
+		if sess := h.registry.getByVirtIP(vip); sess != nil {
+			inbound.User = &protocol.MemoryUser{Email: sess.user.Name}
+		}
 	}
 	ctx = session.ContextWithInbound(ctx, &inbound)
 	ctx = session.ContextWithContent(ctx, &session.Content{SniffingRequest: session.SniffingRequest{Enabled: true}})
@@ -294,11 +400,12 @@ type ocStack struct {
 	endpoint *ocLinkEndpoint
 }
 
-func newOCStack(ctx context.Context, dispatcher routing.Dispatcher, tag string, mtu uint32) *ocStack {
+func newOCStack(ctx context.Context, dispatcher routing.Dispatcher, tag string, mtu uint32, registry *sessionRegistry) *ocStack {
 	device := newOCDevice(mtu)
+	device.registry = registry // enables the L3 client↔client relay
 	return &ocStack{
 		ctx:      ctx,
-		handler:  &ocHandler{ctx: ctx, dispatcher: dispatcher, tag: tag},
+		handler:  &ocHandler{ctx: ctx, dispatcher: dispatcher, tag: tag, registry: registry},
 		device:   device,
 		endpoint: &ocLinkEndpoint{device: device},
 	}

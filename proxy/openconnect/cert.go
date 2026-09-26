@@ -1,6 +1,7 @@
 package openconnect
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -15,7 +16,7 @@ import (
 
 // loadCert loads the TLS certificate/key from files, or generates an ephemeral
 // self-signed certificate when none is configured (useful for testing).
-func loadCert(certFile, keyFile string) (tls.Certificate, error) {
+func loadCert(ctx context.Context, certFile, keyFile string) (tls.Certificate, error) {
 	if certFile != "" && keyFile != "" {
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
@@ -23,6 +24,7 @@ func loadCert(certFile, keyFile string) (tls.Certificate, error) {
 		}
 		return cert, nil
 	}
+	errors.LogWarning(ctx, "openconnect: no certFile/keyFile configured; using an ephemeral self-signed certificate (clients pinning pin-sha256 will need re-pinning after every restart)")
 	return ephemeralCert()
 }
 
@@ -35,9 +37,11 @@ func ephemeralCert() (tls.Certificate, error) {
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "xray-openconnect"},
 		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		// 90 days: an ephemeral cert dying after 24h takes the inbound down
+		// with it once clients start rejecting the handshake.
+		NotAfter:    time.Now().Add(90 * 24 * time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
