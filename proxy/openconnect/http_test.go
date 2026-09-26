@@ -56,6 +56,15 @@ func TestReadHTTP(t *testing.T) {
 		t.Errorf("body = %q, want empty", req.body)
 	}
 
+	// Query strings (ocserv camouflage secret) must be stripped from the path.
+	req, err = readHTTP(bufio.NewReader(strings.NewReader("POST /?forzarussia HTTP/1.1\r\nHost: xray\r\nContent-Length: 0\r\n\r\n")))
+	if err != nil {
+		t.Fatalf("readHTTP (query): %v", err)
+	}
+	if req.path != "/" {
+		t.Errorf("path = %q, want %q (query stripped)", req.path, "/")
+	}
+
 	// Oversized Content-Length → error.
 	if _, err := readHTTP(bufio.NewReader(strings.NewReader("POST / HTTP/1.1\r\nContent-Length: 999999\r\n\r\n"))); err == nil {
 		t.Error("expected error for oversized body")

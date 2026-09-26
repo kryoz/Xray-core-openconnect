@@ -281,9 +281,7 @@ func (s *Server) connectHeaders(sess *ocSession) map[string][]string {
 	}
 	// Split routing: each network is a separate repeated header line, as the
 	// client (libopenconnect/vpnc-script) collects routes per header line.
-	for _, r := range s.conf.Routes {
-		hdrs["X-CSTP-Split-Include"] = append(hdrs["X-CSTP-Split-Include"], r)
-	}
+	hdrs["X-CSTP-Split-Include"] = append(hdrs["X-CSTP-Split-Include"], s.conf.Routes...)
 	// No X-DTLS-Content-Encoding: ocserv omits it when compression is off.
 	return hdrs
 }

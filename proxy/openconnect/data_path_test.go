@@ -273,6 +273,30 @@ func TestConnectSplitRoutes(t *testing.T) {
 	}
 }
 
+// TestControlQueryPath verifies that a query string in the request target
+// (ocserv camouflage secret in the client's server URL, e.g.
+// https://host/?forzarussia) is ignored: the auth flow must start instead of
+// a 404.
+func TestControlQueryPath(t *testing.T) {
+	s := newTestServer(t)
+	c := dialOC(t, s)
+	defer c.Close()
+	// First request carries the query (client's server URL path); the forms
+	// point to /auth, so subsequent requests come without it.
+	writeReq(c, "POST", "/?forzarussia", "", "")
+	if st, _, _, _ := readResp(t, c); st != 200 {
+		t.Fatalf("POST /?forzarussia: status %d, want 200", st)
+	}
+	writeReq(c, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>testuser</username></auth></config-auth>`, "")
+	if st, _, _, body := readResp(t, c); st != 200 || !strings.Contains(body, "password") {
+		t.Fatalf("POST /auth username: status %d, want 200 password form", st)
+	}
+	writeReq(c, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><password>testpass</password></auth></config-auth>`, "")
+	if st, _, setCookies, _ := readResp(t, c); st != 200 || cookieValue(setCookies) == "" {
+		t.Fatalf("auth after query request failed: status %d cookies %v", st, setCookies)
+	}
+}
+
 // readRawHead reads a response head up to the blank line. readResp collapses
 // repeated headers into its map, so repeated lines must be checked on the wire.
 func readRawHead(t *testing.T, c *tls.Conn) string {
