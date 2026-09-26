@@ -27,7 +27,18 @@ type User struct {
 	// Salted SHA-256, format "salt_hex$hash_hex".
 	Password string `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
 	// Optional static IP address assigned to this user.
-	Ip            string `protobuf:"bytes,3,opt,name=ip,proto3" json:"ip,omitempty"`
+	Ip string `protobuf:"bytes,3,opt,name=ip,proto3" json:"ip,omitempty"`
+	// Split-routing override: when non-empty, used instead of the
+	// inbound-level routes for this user's sessions.
+	Routes []string `protobuf:"bytes,4,rep,name=routes,proto3" json:"routes,omitempty"`
+	// Named route-group membership; group routes are advertised before the
+	// user's own routes. Must reference an inbound-level group by name.
+	Group string `protobuf:"bytes,5,opt,name=group,proto3" json:"group,omitempty"`
+	// L3 client-to-client reachability: IP packets whose destination is the
+	// virtual IP of another l3-marked connected user are relayed directly
+	// between their tunnels, bypassing the L4 stack and routing rules.
+	// Pairs without the flag on both sides keep the regular behavior.
+	L3            bool `protobuf:"varint,6,opt,name=l3,proto3" json:"l3,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -83,6 +94,80 @@ func (x *User) GetIp() string {
 	return ""
 }
 
+func (x *User) GetRoutes() []string {
+	if x != nil {
+		return x.Routes
+	}
+	return nil
+}
+
+func (x *User) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
+func (x *User) GetL3() bool {
+	if x != nil {
+		return x.L3
+	}
+	return false
+}
+
+// Group is a named set of split-routing networks shared by users.
+type Group struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Routes        []string               `protobuf:"bytes,2,rep,name=routes,proto3" json:"routes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Group) Reset() {
+	*x = Group{}
+	mi := &file_proxy_openconnect_config_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Group) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Group) ProtoMessage() {}
+
+func (x *Group) ProtoReflect() protoreflect.Message {
+	mi := &file_proxy_openconnect_config_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Group.ProtoReflect.Descriptor instead.
+func (*Group) Descriptor() ([]byte, []int) {
+	return file_proxy_openconnect_config_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *Group) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Group) GetRoutes() []string {
+	if x != nil {
+		return x.Routes
+	}
+	return nil
+}
+
 type OpenConnectInboundConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Users []*User                `protobuf:"bytes,1,rep,name=users,proto3" json:"users,omitempty"`
@@ -112,13 +197,15 @@ type OpenConnectInboundConfig struct {
 	CamouflageSecret string `protobuf:"bytes,12,opt,name=camouflage_secret,json=camouflageSecret,proto3" json:"camouflage_secret,omitempty"`
 	// Realm advertised in the 401 WWW-Authenticate header. Empty = plain 404.
 	CamouflageRealm string `protobuf:"bytes,13,opt,name=camouflage_realm,json=camouflageRealm,proto3" json:"camouflage_realm,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Named route groups referenced by User.group.
+	Groups        []*Group `protobuf:"bytes,14,rep,name=groups,proto3" json:"groups,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OpenConnectInboundConfig) Reset() {
 	*x = OpenConnectInboundConfig{}
-	mi := &file_proxy_openconnect_config_proto_msgTypes[1]
+	mi := &file_proxy_openconnect_config_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -130,7 +217,7 @@ func (x *OpenConnectInboundConfig) String() string {
 func (*OpenConnectInboundConfig) ProtoMessage() {}
 
 func (x *OpenConnectInboundConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proxy_openconnect_config_proto_msgTypes[1]
+	mi := &file_proxy_openconnect_config_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -143,7 +230,7 @@ func (x *OpenConnectInboundConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenConnectInboundConfig.ProtoReflect.Descriptor instead.
 func (*OpenConnectInboundConfig) Descriptor() ([]byte, []int) {
-	return file_proxy_openconnect_config_proto_rawDescGZIP(), []int{1}
+	return file_proxy_openconnect_config_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *OpenConnectInboundConfig) GetUsers() []*User {
@@ -237,15 +324,28 @@ func (x *OpenConnectInboundConfig) GetCamouflageRealm() string {
 	return ""
 }
 
+func (x *OpenConnectInboundConfig) GetGroups() []*Group {
+	if x != nil {
+		return x.Groups
+	}
+	return nil
+}
+
 var File_proxy_openconnect_config_proto protoreflect.FileDescriptor
 
 const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\n" +
-	"\x1eproxy/openconnect/config.proto\x12\x16xray.proxy.openconnect\"F\n" +
+	"\x1eproxy/openconnect/config.proto\x12\x16xray.proxy.openconnect\"\x84\x01\n" +
 	"\x04User\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12\x0e\n" +
-	"\x02ip\x18\x03 \x01(\tR\x02ip\"\xa9\x03\n" +
+	"\x02ip\x18\x03 \x01(\tR\x02ip\x12\x16\n" +
+	"\x06routes\x18\x04 \x03(\tR\x06routes\x12\x14\n" +
+	"\x05group\x18\x05 \x01(\tR\x05group\x12\x0e\n" +
+	"\x02l3\x18\x06 \x01(\bR\x02l3\"3\n" +
+	"\x05Group\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
+	"\x06routes\x18\x02 \x03(\tR\x06routes\"\xe0\x03\n" +
 	"\x18OpenConnectInboundConfig\x122\n" +
 	"\x05users\x18\x01 \x03(\v2\x1c.xray.proxy.openconnect.UserR\x05users\x12\x16\n" +
 	"\x06subnet\x18\x02 \x01(\tR\x06subnet\x12\x10\n" +
@@ -261,7 +361,8 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	" \x01(\rR\bdtlsPort\x12\x16\n" +
 	"\x06routes\x18\v \x03(\tR\x06routes\x12+\n" +
 	"\x11camouflage_secret\x18\f \x01(\tR\x10camouflageSecret\x12)\n" +
-	"\x10camouflage_realm\x18\r \x01(\tR\x0fcamouflageRealmBd\n" +
+	"\x10camouflage_realm\x18\r \x01(\tR\x0fcamouflageRealm\x125\n" +
+	"\x06groups\x18\x0e \x03(\v2\x1d.xray.proxy.openconnect.GroupR\x06groupsBd\n" +
 	"\x1acom.xray.proxy.openconnectP\x01Z+github.com/xtls/xray-core/proxy/openconnect\xaa\x02\x16Xray.Proxy.OpenConnectb\x06proto3"
 
 var (
@@ -276,18 +377,20 @@ func file_proxy_openconnect_config_proto_rawDescGZIP() []byte {
 	return file_proxy_openconnect_config_proto_rawDescData
 }
 
-var file_proxy_openconnect_config_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_proxy_openconnect_config_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_proxy_openconnect_config_proto_goTypes = []any{
 	(*User)(nil),                     // 0: xray.proxy.openconnect.User
-	(*OpenConnectInboundConfig)(nil), // 1: xray.proxy.openconnect.OpenConnectInboundConfig
+	(*Group)(nil),                    // 1: xray.proxy.openconnect.Group
+	(*OpenConnectInboundConfig)(nil), // 2: xray.proxy.openconnect.OpenConnectInboundConfig
 }
 var file_proxy_openconnect_config_proto_depIdxs = []int32{
 	0, // 0: xray.proxy.openconnect.OpenConnectInboundConfig.users:type_name -> xray.proxy.openconnect.User
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	1, // 1: xray.proxy.openconnect.OpenConnectInboundConfig.groups:type_name -> xray.proxy.openconnect.Group
+	2, // [2:2] is the sub-list for method output_type
+	2, // [2:2] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_proxy_openconnect_config_proto_init() }
@@ -301,7 +404,7 @@ func file_proxy_openconnect_config_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proxy_openconnect_config_proto_rawDesc), len(file_proxy_openconnect_config_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

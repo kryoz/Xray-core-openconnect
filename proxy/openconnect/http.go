@@ -15,6 +15,10 @@ import (
 // maxBodyLimit bounds the control-channel request body (forms are tiny).
 const maxBodyLimit = 16 * 1024
 
+// maxHeaderLimit bounds the total header block: an unauthenticated client can
+// stream unlimited 8KB lines within the auth window otherwise.
+const maxHeaderLimit = 16 * 1024
+
 // httpReq is a parsed OpenConnect control-channel request.
 type httpReq struct {
 	method  string
@@ -41,6 +45,7 @@ func readHTTP(br *bufio.Reader) (*httpReq, error) {
 		return nil, errors.New("bad request line: ", string(line)).AtError()
 	}
 	headers := make(map[string]string, 8)
+	var headerBytes int
 	for {
 		line, err := br.ReadSlice('\n')
 		if err != nil {
@@ -48,6 +53,10 @@ func readHTTP(br *bufio.Reader) (*httpReq, error) {
 				return nil, errors.New("header line too long").AtError()
 			}
 			return nil, errors.New("read headers").Base(err).AtError()
+		}
+		headerBytes += len(line)
+		if headerBytes > maxHeaderLimit {
+			return nil, errors.New("headers too large").AtError()
 		}
 		lineStr := strings.TrimRight(string(line), "\r\n")
 		if lineStr == "" {

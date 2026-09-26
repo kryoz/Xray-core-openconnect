@@ -85,17 +85,17 @@ func newTestServer(t *testing.T) *Server {
 	}
 
 	tctx, cancel := context.WithCancel(context.Background())
-	stack := newOCStack(tctx, nil, "test", mtuOf(conf))
+	registry := newSessionRegistry(pool)
+	stack := newOCStack(tctx, nil, "openconnect", mtuOf(conf), registry)
 	s := &Server{
-		conf:        conf,
-		ctx:         tctx,
-		cancel:      cancel,
-		src:         xnet.DestinationFromAddr(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: tcpPort}),
-		cert:        cert,
-		registry:    newSessionRegistry(pool),
-		users:       users,
-		limiter:     newAuthLimiter(),
-		pendingUser: make(map[string]string),
+		conf:     conf,
+		ctx:      tctx,
+		cancel:   cancel,
+		src:      xnet.DestinationFromAddr(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: tcpPort}),
+		cert:     cert,
+		registry: registry,
+		users:    users,
+		limiter:  newAuthLimiter(),
 
 		stack:  stack,
 		device: stack.device,
@@ -306,4 +306,57 @@ func TestResumeExpiredRejects(t *testing.T) {
 		t.Fatalf("expired resume: status %d, want 401", st)
 	}
 	c3.Close()
+}
+
+// TestRegistryRemoveKeepsSuccessor covers two sessions sharing one client IP
+// (static-IP user, or two clients behind one NAT): the old session's removal
+// must not clobber the successor's index entries.
+func TestRegistryRemoveKeepsSuccessor(t *testing.T) {
+	pool, err := newIPPool("10.77.0.0/24")
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	r := newSessionRegistry(pool)
+	u := &User{Name: "alice"}
+	old, err := r.create("app-old", "1.2.3.4", u)
+	if err != nil {
+		t.Fatalf("create old: %v", err)
+	}
+	fresh, err := r.create("app-new", "1.2.3.4", u)
+	if err != nil {
+		t.Fatalf("create fresh: %v", err)
+	}
+	r.remove(old)
+	if got := r.getByClientIP("1.2.3.4"); got != fresh {
+		t.Fatalf("byClientIP after old remove: want fresh session, got %+v", got)
+	}
+	if got := r.getByAppID("app-new"); got != fresh {
+		t.Fatal("successor byAppID lost")
+	}
+	r.remove(fresh)
+	if got := r.getByClientIP("1.2.3.4"); got != nil {
+		t.Fatal("byClientIP after fresh remove: want nil")
+	}
+}
+
+// TestRegistryByVirtIP checks the virtual-IP index that attributes L4 flows
+// to the authenticated user for per-user stats.
+func TestRegistryByVirtIP(t *testing.T) {
+	pool, err := newIPPool("10.77.0.0/24")
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	r := newSessionRegistry(pool)
+	user := &User{Name: "alice"}
+	sess, err := r.create("", "1.2.3.4", user)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if got := r.getByVirtIP(sess.ip); got == nil || got.user != user {
+		t.Fatalf("getByVirtIP: want alice's session, got %+v", got)
+	}
+	r.remove(sess)
+	if got := r.getByVirtIP(sess.ip); got != nil {
+		t.Fatal("getByVirtIP after remove: want nil")
+	}
 }

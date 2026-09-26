@@ -4,9 +4,12 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 
+	stderrors "errors"
 	"github.com/pion/dtls/v3"
+
 	"github.com/xtls/xray-core/common/errors"
 )
 
@@ -29,8 +32,10 @@ const (
 const pskNegotiate = "PSK-NEGOTIATE"
 
 // ocPipe is the per-session UDP packet channel fed by the demux loop.
+// addr is the current peer address: written by the NAT-rebinding path in
+// routeUDPPacket, read by sessionConn.WriteTo, hence the atomic pointer.
 type ocPipe struct {
-	addr *net.UDPAddr
+	addr atomic.Pointer[net.UDPAddr]
 	ch   chan ocUDPPkt
 }
 
@@ -40,8 +45,17 @@ type ocUDPPkt struct {
 }
 
 func newOCPipe(addr *net.UDPAddr) *ocPipe {
-	return &ocPipe{addr: addr, ch: make(chan ocUDPPkt, 64)}
+	p := &ocPipe{ch: make(chan ocUDPPkt, 64)}
+	p.addr.Store(addr)
+	return p
 }
+
+// curAddr returns the address outgoing DTLS records must be written to.
+// pion/dtls caches the handshake-time peer address and only re-learns it on
+// Connection-ID records (RFC 9146), which this inbound never negotiates — so
+// WriteTo ignores the addr pion passes and writes to the rebind-tracked one.
+func (p *ocPipe) curAddr() net.Addr { return p.addr.Load() }
+func (p *ocPipe) key() string       { return p.addr.Load().String() }
 
 // sessionConn is a net.PacketConn view of one session's UDP traffic. pion/dtls
 // uses ReadFrom/WriteTo on it: ReadFrom drains the session's pipe, WriteTo goes
@@ -63,8 +77,8 @@ func (sc *sessionConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	return n, p.from, nil
 }
 
-func (sc *sessionConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	return sc.ln.WriteTo(b, addr)
+func (sc *sessionConn) WriteTo(b []byte, _ net.Addr) (int, error) {
+	return sc.ln.WriteTo(b, sc.pipe.curAddr())
 }
 
 func (sc *sessionConn) Close() error                  { return nil }
@@ -88,6 +102,9 @@ func (s *Server) udpLoop() {
 	for {
 		n, addr, err := s.udpLn.ReadFrom(buf)
 		if err != nil {
+			if !stderrors.Is(err, net.ErrClosed) {
+				errors.LogError(s.ctx, "openconnect: UDP read loop stopped: ", err)
+			}
 			return
 		}
 		ua, ok := addr.(*net.UDPAddr)
@@ -131,14 +148,18 @@ func (s *Server) routeUDPPacket(data []byte, ua *net.UDPAddr) {
 
 	// Non-ClientHello from an unknown source port: NAT rebinding. The client
 	// kept its DTLS session but changed its UDP port; re-key the session's
-	// existing pipe to the new addr (pion/dtls re-learns the peer addr from
-	// the next ReadFrom and updates its write target).
+	// existing pipe to the new addr so both reads (pipe) and writes
+	// (curAddr) follow the client.
 	sess := s.registry.getByClientIP(ua.IP.String())
 	if sess == nil || sess.pipe == nil {
 		return
 	}
-	delete(s.pipes, sess.pipe.addr.String())
-	sess.pipe.addr = ua
+	if oldKey := sess.pipe.key(); oldKey != key {
+		if cur, ok := s.pipes[oldKey]; !ok || cur == sess.pipe {
+			delete(s.pipes, oldKey)
+		}
+	}
+	sess.pipe.addr.Store(ua)
 	s.pipes[key] = sess.pipe
 	s.pushPipe(sess.pipe, data, ua)
 }
@@ -194,15 +215,15 @@ func (s *Server) startDTLSSession(sess *ocSession, pipe *ocPipe, addr *net.UDPAd
 		errors.LogInfo(s.ctx, "openconnect: DTLS handshake failed for ", sess.ip, ": ", err)
 		return
 	}
-	sess.mu.Lock()
-	sess.dtlsConn = dc
-	sess.mu.Unlock()
-	errors.LogInfo(s.ctx, "openconnect: DTLS established for ", sess.ip)
-
-	s.device.register(sess.ip.String(), func(framed []byte) error {
+	dtlsWriter := func(framed []byte) error {
 		_, err := dc.Write(framed)
 		return err
-	})
+	}
+	sess.mu.Lock()
+	sess.dtlsConn = dc
+	sess.dtlsWriter = s.device.register(sess.ip, dtlsWriter)
+	sess.mu.Unlock()
+	errors.LogInfo(s.ctx, "openconnect: DTLS established for ", sess.ip)
 	sess.touchActivity()
 	s.dtlsReadPump(sess, dc)
 	s.teardownDTLS(sess, pipe, dc)
@@ -214,8 +235,16 @@ func (s *Server) startDTLSSession(sess *ocSession, pipe *ocPipe, addr *net.UDPAd
 // dpd seconds of silence it sends DPD_OUT, and after 2×dpd it kicks the peer.
 func (s *Server) dtlsReadPump(sess *ocSession, dc *dtls.Conn) {
 	dpd := time.Duration(s.dpdSecs()) * time.Second
-	buf := make([]byte, int(s.mtu())+16)
+	// Full DTLS-record headroom: a record larger than the MTU must be dropped,
+	// not kill the tunnel as a read error.
+	buf := make([]byte, 65536)
+	from := sess.ip
 	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+		}
 		dc.SetReadDeadline(time.Now().Add(dpd))
 		n, err := dc.Read(buf)
 		if err != nil {
@@ -236,14 +265,16 @@ func (s *Server) dtlsReadPump(sess *ocSession, dc *dtls.Conn) {
 		switch buf[0] {
 		case acPKTData:
 			if n > 1 {
-				payload := make([]byte, n-1)
-				copy(payload, buf[1:n])
-				if len(payload) > int(s.mtu()) {
-					errors.LogWarning(s.ctx, "openconnect: dropping oversized data packet from ", sess.ip, " (", len(payload), " bytes)")
+				if n-1 > int(s.mtu()) {
+					errors.LogWarning(s.ctx, "openconnect: dropping oversized data packet from ", sess.ip, " (", n-1, " bytes)")
 					continue
 				}
+				// The copied slice keeps the full wire frame [acPKTData]+IP:
+				// the L3 relay hands it to the peer tunnel as-is, zero-copy.
+				frame := make([]byte, n)
+				copy(frame, buf[:n])
 				select {
-				case s.device.rxCh <- ocRxPkt{version: payload[0] >> 4, payload: payload}:
+				case s.device.rxCh <- ocRxPkt{from: from, frame: frame}:
 				default:
 				}
 			}
@@ -267,21 +298,29 @@ func (s *Server) dtlsReadPump(sess *ocSession, dc *dtls.Conn) {
 // checked against the session's current dtlsConn so that a superseded (older)
 // generation tears down without clobbering the one that replaced it: it closes
 // only its own dc, unregisters/marks-disconnected only if it is still current,
-// and always drops its own pipe.
+// and always drops its own pipe. When the CSTP/TCP fallback link is still
+// alive, the device writer is handed back to it instead of unregistering —
+// ocserv keeps serving data over CSTP after DTLS dies.
 func (s *Server) teardownDTLS(sess *ocSession, pipe *ocPipe, dc *dtls.Conn) {
 	sess.mu.Lock()
 	mine := sess.dtlsConn == dc
 	if mine {
 		sess.dtlsConn = nil
-		sess.connected = false
-		sess.lastDisc = time.Now()
+		if sess.cstpWrite != nil {
+			// Hand the device writer back to the live CSTP pump. The token
+			// becomes the session's current registration so the pump's own
+			// teardown removes exactly this entry.
+			sess.dtlsWriter = s.device.register(sess.ip, sess.cstpWrite)
+		} else {
+			s.device.unregisterIf(sess.ip, sess.dtlsWriter)
+			sess.dtlsWriter = nil
+			sess.connected = false
+			sess.lastDisc = time.Now()
+		}
 	}
 	sess.mu.Unlock()
 
 	dc.Close()
-	if mine {
-		s.device.unregister(sess.ip.String())
-	}
 	s.dropPipe(sess, pipe)
 }
 
@@ -290,8 +329,8 @@ func (s *Server) teardownDTLS(sess *ocSession, pipe *ocPipe, dc *dtls.Conn) {
 func (s *Server) dropPipe(sess *ocSession, pipe *ocPipe) {
 	s.dmuMu.Lock()
 	defer s.dmuMu.Unlock()
-	if cur, ok := s.pipes[pipe.addr.String()]; ok && cur == pipe {
-		delete(s.pipes, pipe.addr.String())
+	if cur, ok := s.pipes[pipe.key()]; ok && cur == pipe {
+		delete(s.pipes, pipe.key())
 		close(pipe.ch)
 	}
 	if sess.pipe == pipe {
