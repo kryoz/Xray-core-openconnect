@@ -34,6 +34,7 @@ type OpenConnectConfig struct {
 	CamouflageSecret string                   `json:"camouflageSecret,omitempty"`
 	CamouflageRealm  string                   `json:"camouflageRealm,omitempty"`
 	Groups           []OpenConnectGroupConfig `json:"groups,omitempty"`
+	Cipher           string                   `json:"cipher,omitempty"`
 }
 
 func (c *OpenConnectConfig) Build() (proto.Message, error) {
@@ -61,6 +62,7 @@ func (c *OpenConnectConfig) Build() (proto.Message, error) {
 	config.DtlsPort = c.DtlsPort
 	config.CamouflageSecret = c.CamouflageSecret
 	config.CamouflageRealm = c.CamouflageRealm
+	config.Cipher = c.Cipher
 	config.Groups = make([]*openconnect.Group, len(c.Groups))
 	for i := range c.Groups {
 		config.Groups[i] = &openconnect.Group{

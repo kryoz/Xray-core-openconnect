@@ -70,7 +70,7 @@ func TestDTLSDataPath(t *testing.T) {
 	if cookie == "" {
 		t.Fatalf("no webvpn cookie in %v", setCookies)
 	}
-	c1.Close()
+	_ = c1.Close()
 
 	c2 := dialOC(t, s)
 	writeReq(c2, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
@@ -79,7 +79,7 @@ func TestDTLSDataPath(t *testing.T) {
 	} else if hdrs["x-cstp-address"] == "" {
 		t.Fatalf("CONNECT: missing X-CSTP-Address")
 	}
-	defer c2.Close()
+	defer func() { _ = c2.Close() }()
 
 	sess := s.registry.getByClientIP("127.0.0.1")
 	if sess == nil {
@@ -96,7 +96,7 @@ func TestDTLSDataPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen udp: %v", err)
 	}
-	defer pc.Close()
+	defer func() { _ = pc.Close() }()
 
 	dc, err := dtls.ClientWithOptions(pc, udpAddr,
 		dtls.WithPSK(func(_ []byte) ([]byte, error) { return psk, nil }),
@@ -109,7 +109,7 @@ func TestDTLSDataPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dtls client: %v", err)
 	}
-	defer dc.Close()
+	defer func() { _ = dc.Close() }()
 	if err := dc.HandshakeContext(context.Background()); err != nil {
 		t.Fatalf("dtls handshake: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestDTLSDataPath(t *testing.T) {
 	}
 
 	// 4. Read the reply and verify it is a framed ICMP echo reply.
-	dc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = dc.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 2048)
 	n, err := dc.Read(buf)
 	if err != nil {
@@ -267,13 +267,13 @@ func TestL3ClientToClientRelay(t *testing.T) {
 
 	// A: CONNECT + DTLS tunnel.
 	cA, _, sessA := ocConnectAs(t, s, "l3a", "pass1")
-	defer cA.Close()
+	defer func() { _ = cA.Close() }()
 	dc := dialDTLS(t, s, sessA.getPSK())
-	defer dc.Close()
+	defer func() { _ = dc.Close() }()
 
 	// B: CONNECT (CSTP-only, no DTLS).
 	cB, brB, sessB := ocConnectAs(t, s, "l3b", "pass2")
-	defer cB.Close()
+	defer func() { _ = cB.Close() }()
 
 	// A → B: echo request must arrive framed on B's CSTP tunnel.
 	ipA2B := buildICMPEchoRequest(sessA.ip.AsSlice(), sessB.ip.AsSlice(), 0x4242, 1, []byte("relay"))
@@ -291,7 +291,7 @@ func TestL3ClientToClientRelay(t *testing.T) {
 	if _, err := cB.Write(cstFrame(acPKTData, ipB2A)); err != nil {
 		t.Fatalf("cstp write: %v", err)
 	}
-	dc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = dc.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 2048)
 	n, err := dc.Read(buf)
 	if err != nil {
@@ -320,11 +320,11 @@ func dialDTLS(t *testing.T, s *Server, psk []byte) *dtls.Conn {
 		),
 	)
 	if err != nil {
-		pc.Close()
+		_ = pc.Close()
 		t.Fatalf("dtls client: %v", err)
 	}
 	if err := dc.HandshakeContext(context.Background()); err != nil {
-		dc.Close()
+		_ = dc.Close()
 		t.Fatalf("dtls handshake: %v", err)
 	}
 	return dc
@@ -346,14 +346,14 @@ func TestDTLSReconnectAfterDisconnect(t *testing.T) {
 	if cookie == "" {
 		t.Fatalf("no webvpn cookie in %v", setCookies)
 	}
-	c1.Close()
+	_ = c1.Close()
 
 	c2 := dialOC(t, s)
 	writeReq(c2, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
 	if st, _, _, _ := readResp(t, c2); st != 200 {
 		t.Fatalf("CONNECT: status %d", st)
 	}
-	defer c2.Close()
+	defer func() { _ = c2.Close() }()
 
 	sess := s.registry.getByClientIP("127.0.0.1")
 	if sess == nil {
@@ -367,7 +367,7 @@ func TestDTLSReconnectAfterDisconnect(t *testing.T) {
 	if _, err := dc1.Write([]byte{acPKTDisconnect}); err != nil {
 		t.Fatalf("send disconnect: %v", err)
 	}
-	dc1.Close()
+	_ = dc1.Close()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -392,7 +392,7 @@ func TestDTLSReconnectAfterDisconnect(t *testing.T) {
 	// A fresh ClientHello must start a new handshake, not be swallowed by a
 	// stale pipe.
 	dc2 := dialDTLS(t, s, psk)
-	dc2.Close()
+	_ = dc2.Close()
 }
 
 // TestConnectSplitRoutes verifies that split-routing networks are advertised
@@ -408,10 +408,10 @@ func TestConnectSplitRoutes(t *testing.T) {
 	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><password>testpass</password></auth></config-auth>`, "")
 	_, _, setCookies, _ := readResp(t, c1)
 	cookie := cookieValue(setCookies)
-	c1.Close()
+	_ = c1.Close()
 
 	c2 := dialOC(t, s)
-	defer c2.Close()
+	defer func() { _ = c2.Close() }()
 	writeReq(c2, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
 	raw := readRawHead(t, c2)
 	for _, want := range s.conf.Routes {
@@ -449,7 +449,7 @@ func TestConnectPerUserRoutes(t *testing.T) {
 		}
 		_ = c.Close()
 		cc := dialOC(t, s)
-		defer cc.Close()
+		defer func() { _ = cc.Close() }()
 		writeReq(cc, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
 		return readRawHead(t, cc)
 	}
@@ -500,7 +500,7 @@ func TestConnectGroupRoutes(t *testing.T) {
 		}
 		_ = c.Close()
 		cc := dialOC(t, s)
-		defer cc.Close()
+		defer func() { _ = cc.Close() }()
 		writeReq(cc, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
 		return readRawHead(t, cc)
 	}
@@ -545,7 +545,7 @@ func TestConnectGroupRoutes(t *testing.T) {
 func TestControlQueryPath(t *testing.T) {
 	s := newTestServer(t)
 	c := dialOC(t, s)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	// First request carries the query (client's server URL path); the forms
 	// point to /auth, so subsequent requests come without it.
 	writeReq(c, "POST", "/?forzarussia", "", "")
@@ -559,6 +559,49 @@ func TestControlQueryPath(t *testing.T) {
 	writeReq(c, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><password>testpass</password></auth></config-auth>`, "")
 	if st, _, setCookies, _ := readResp(t, c); st != 200 || cookieValue(setCookies) == "" {
 		t.Fatalf("auth after query request failed: status %d cookies %v", st, setCookies)
+	}
+}
+
+// TestAuthCombinedForm reproduces the mobile (libopenconnect/AnyConnect)
+// flow: the initial form must carry username AND password together like
+// ocserv's main form, credentials are POSTed in one body, and a
+// password-stage reply that re-includes the username must authenticate
+// instead of re-asking for the password (that loop is what broke mobile
+// clients).
+func TestAuthCombinedForm(t *testing.T) {
+	s := newTestServer(t)
+	c := dialOC(t, s)
+	defer func() { _ = c.Close() }()
+
+	writeReq(c, "POST", "/", "", "")
+	if st, _, _, body := readResp(t, c); st != 200 || !strings.Contains(body, `name="username"`) || !strings.Contains(body, `name="password"`) {
+		t.Fatalf("initial form: status %d, want username+password inputs:\n%s", st, body)
+	}
+
+	// One-shot: both credentials in a single XML POST.
+	writeReq(c, "POST", "/auth", `<?xml version="1.0"?><config-auth client="vpn" type="auth-reply"><auth><username>testuser</username><password>testpass</password></auth></config-auth>`, "")
+	if st, _, setCookies, _ := readResp(t, c); st != 200 || cookieValue(setCookies) == "" {
+		t.Fatalf("one-shot auth: status %d, cookies %v", st, setCookies)
+	}
+
+	// Wrong password in a one-shot POST must fail, not re-prompt.
+	writeReq(c, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>testuser</username><password>wrongpass</password></auth></config-auth>`, "")
+	if st, _, _, body := readResp(t, c); st != 401 || strings.Contains(body, "Please enter your password") {
+		t.Fatalf("wrong one-shot password: status %d, body %q", st, body)
+	}
+	_ = c.Close()
+
+	// Split flow where libopenconnect re-sends the username with the
+	// password-only form: must authenticate, not loop on the password form.
+	c = dialOC(t, s)
+	defer func() { _ = c.Close() }()
+	writeReq(c, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>testuser</username></auth></config-auth>`, "")
+	if st, _, _, body := readResp(t, c); st != 200 || !strings.Contains(body, "Please enter your password") {
+		t.Fatalf("username stage: status %d, body %q", st, body)
+	}
+	writeReq(c, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>testuser</username><password>testpass</password></auth></config-auth>`, "")
+	if st, _, setCookies, _ := readResp(t, c); st != 200 || cookieValue(setCookies) == "" {
+		t.Fatalf("password stage with username re-sent: status %d, cookies %v", st, setCookies)
 	}
 }
 
@@ -578,7 +621,7 @@ func TestCamouflage(t *testing.T) {
 	if st != 401 || hdrs["www-authenticate"] != `Basic realm="Restricted area"` {
 		t.Fatalf("no secret: status %d, www-authenticate %q", st, hdrs["www-authenticate"])
 	}
-	c.Close()
+	_ = c.Close()
 
 	// Wrong secret → same.
 	c = dialOC(t, s)
@@ -586,7 +629,7 @@ func TestCamouflage(t *testing.T) {
 	if st, _, _, _ := readResp(t, c); st != 401 {
 		t.Fatalf("wrong secret: status %d, want 401", st)
 	}
-	c.Close()
+	_ = c.Close()
 
 	// Correct secret → auth proceeds, and the pass stays for follow-up
 	// requests without the query (forms point to /auth).
@@ -605,7 +648,7 @@ func TestCamouflage(t *testing.T) {
 		t.Fatalf("auth after secret: status %d cookies %v", st, setCookies)
 	}
 	cookie := cookieValue(setCookies)
-	c.Close()
+	_ = c.Close()
 
 	// A valid session cookie passes without the secret (resume path).
 	c = dialOC(t, s)
@@ -613,7 +656,7 @@ func TestCamouflage(t *testing.T) {
 	if st, _, _, _ := readResp(t, c); st != 200 {
 		t.Fatalf("resume with cookie: status %d, want 200", st)
 	}
-	c.Close()
+	_ = c.Close()
 
 	// No realm configured → plain 404.
 	s.conf.CamouflageRealm = ""
@@ -622,7 +665,7 @@ func TestCamouflage(t *testing.T) {
 	if st, _, _, _ := readResp(t, c); st != 404 {
 		t.Fatalf("no realm: status %d, want 404", st)
 	}
-	c.Close()
+	_ = c.Close()
 }
 
 // readRawHead reads a response head up to the blank line. readResp collapses
@@ -664,13 +707,13 @@ func TestL3RelayMixedOrderCSTPFirst(t *testing.T) {
 
 	// B (CSTP-only) connects first.
 	cB, brB, sessB := ocConnectAs(t, s, "l3b", "pass2")
-	defer cB.Close()
+	defer func() { _ = cB.Close() }()
 
 	// A connects second and brings up DTLS (resolves via byClientIP → A).
 	cA, _, sessA := ocConnectAs(t, s, "l3a", "pass1")
-	defer cA.Close()
+	defer func() { _ = cA.Close() }()
 	dc := dialDTLS(t, s, sessA.getPSK())
-	defer dc.Close()
+	defer func() { _ = dc.Close() }()
 
 	// A failed DTLS attempt with a wrong PSK from the same client IP: the
 	// ClientHello carries no App-ID (pion, like OpenSSL), so it resolves to
@@ -682,7 +725,7 @@ func TestL3RelayMixedOrderCSTPFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen udp: %v", err)
 	}
-	defer pc.Close()
+	defer func() { _ = pc.Close() }()
 	bad, err := dtls.ClientWithOptions(pc, udpAddr,
 		dtls.WithPSK(func(_ []byte) ([]byte, error) { return []byte("wrong-psk-wrong-psk-wrong-psk!!"), nil }),
 		dtls.WithPSKIdentityHint([]byte("psk")),
@@ -694,7 +737,7 @@ func TestL3RelayMixedOrderCSTPFirst(t *testing.T) {
 	hctx, hcancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer hcancel()
 	if err := bad.HandshakeContext(hctx); err == nil {
-		bad.Close()
+		_ = bad.Close()
 		t.Fatal("handshake with wrong PSK unexpectedly succeeded")
 	}
 
@@ -718,7 +761,7 @@ func TestL3RelayMixedOrderCSTPFirst(t *testing.T) {
 	if _, err := cB.Write(cstFrame(acPKTData, ipB2A)); err != nil {
 		t.Fatalf("cstp write: %v", err)
 	}
-	dc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = dc.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 2048)
 	n, err := dc.Read(buf)
 	if err != nil {
@@ -747,9 +790,9 @@ func TestRelayAfterResumeWithoutDTLS(t *testing.T) {
 
 	// A: DTLS client.
 	cA, _, sessA := ocConnectAs(t, s, "l3a", "pass1")
-	defer cA.Close()
+	defer func() { _ = cA.Close() }()
 	dcA := dialDTLS(t, s, sessA.getPSK())
-	defer dcA.Close()
+	defer func() { _ = dcA.Close() }()
 
 	// B: auth once, keep the cookie; CONNECT + DTLS (both channels up).
 	cAuth := dialOC(t, s)
@@ -777,9 +820,9 @@ func TestRelayAfterResumeWithoutDTLS(t *testing.T) {
 	// live tunnel and its writer — the exact field condition.
 
 	// B reconnects over CSTP only (resume without DTLS).
-	cB1.Close()
+	_ = cB1.Close()
 	cB2 := dialOC(t, s)
-	defer cB2.Close()
+	defer func() { _ = cB2.Close() }()
 	writeReq(cB2, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
 	brB := bufio.NewReader(cB2)
 	for {
@@ -799,7 +842,7 @@ func TestRelayAfterResumeWithoutDTLS(t *testing.T) {
 	if _, err := cB2.Write(cstFrame(acPKTData, ipB2A)); err != nil {
 		t.Fatalf("cstp write: %v", err)
 	}
-	dcA.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = dcA.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 2048)
 	n, err := dcA.Read(buf)
 	if err != nil {
@@ -841,20 +884,20 @@ func TestRelayWriterSurvivesStaleSessionTeardown(t *testing.T) {
 
 	// A: DTLS client (the relay source).
 	cA, _, sessA := ocConnectAs(t, s, "l3a", "pass1")
-	defer cA.Close()
+	defer func() { _ = cA.Close() }()
 	dcA := dialDTLS(t, s, sessA.getPSK())
-	defer dcA.Close()
+	defer func() { _ = dcA.Close() }()
 
 	// B generation 1: CSTP + DTLS, then the client walks away (old session
 	// stays "live" server-side until DPD notices).
 	cB1, _, sessB1 := ocConnectAs(t, s, "l3b", "pass2")
 	dcB1 := dialDTLS(t, s, sessB1.getPSK())
 	_ = dcB1
-	cB1.Close()
+	_ = cB1.Close()
 
 	// B generation 2: fresh auth (new session) on the SAME static IP, CSTP.
 	cB2, brB, sessB2 := ocConnectAs(t, s, "l3b", "pass2")
-	defer cB2.Close()
+	defer func() { _ = cB2.Close() }()
 	if sessB2 == sessB1 {
 		t.Fatal("expected a distinct session for the second auth")
 	}

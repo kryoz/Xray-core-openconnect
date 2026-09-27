@@ -15,7 +15,9 @@ const (
 	MinMTU = 576
 	MaxMTU = 1500
 
-	DefaultMTU           = 1400
+	// DefaultMTU matches a standard 1500-byte link so both tunnel MSS values
+	// reach ~1394; NewServer clamps it down to the listen interface's MTU.
+	DefaultMTU           = 1500
 	DefaultDPD           = 90
 	DefaultCookieTimeout = 300
 )
@@ -144,6 +146,11 @@ func (c *OpenConnectInboundConfig) validate() error {
 	}
 	if c.Mtu != 0 && (c.Mtu < MinMTU || c.Mtu > MaxMTU) {
 		return errors.New("mtu out of range [", MinMTU, ",", MaxMTU, "]: ", c.Mtu).AtError()
+	}
+	switch c.Cipher {
+	case "", "auto", "aes128gcm", "chacha20poly1305":
+	default:
+		return errors.New("cipher must be one of auto, aes128gcm, chacha20poly1305: ", c.Cipher).AtError()
 	}
 	return nil
 }

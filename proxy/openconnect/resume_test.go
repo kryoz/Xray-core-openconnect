@@ -29,7 +29,7 @@ func freePort(t *testing.T, network string) int {
 			t.Fatalf("freePort(udp): %v", err)
 		}
 		addr = pc.LocalAddr()
-		pc.Close()
+		_ = pc.Close()
 	} else {
 		var l net.Listener
 		l, err = net.Listen("tcp", "127.0.0.1:0")
@@ -37,7 +37,7 @@ func freePort(t *testing.T, network string) int {
 			t.Fatalf("freePort(tcp): %v", err)
 		}
 		addr = l.Addr()
-		l.Close()
+		_ = l.Close()
 	}
 	switch a := addr.(type) {
 	case *net.TCPAddr:
@@ -104,7 +104,7 @@ func newTestServer(t *testing.T) *Server {
 	if err := s.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -218,7 +218,7 @@ func TestResumePreservesIP(t *testing.T) {
 	if cookie == "" {
 		t.Fatalf("no webvpn cookie in %v", setCookies)
 	}
-	c1.Close()
+	_ = c1.Close()
 
 	// Connection 2: CONNECT with the cookie → get IP1, then close (tunnel down).
 	c2 := dialOC(t, s)
@@ -231,7 +231,7 @@ func TestResumePreservesIP(t *testing.T) {
 	if ip1 == "" {
 		t.Fatalf("no X-CSTP-Address in first CONNECT: %v", hdrs)
 	}
-	c2.Close() // simulate tunnel disconnect
+	_ = c2.Close() // simulate tunnel disconnect
 
 	// Give the server a moment to observe the disconnect.
 	time.Sleep(50 * time.Millisecond)
@@ -247,7 +247,7 @@ func TestResumePreservesIP(t *testing.T) {
 	if ip2 != ip1 {
 		t.Fatalf("resume changed IP: got %s, want %s", ip2, ip1)
 	}
-	c3.Close()
+	_ = c3.Close()
 }
 
 // TestResumeExpiredRejects verifies that a cookie presented after the resume
@@ -267,7 +267,7 @@ func TestResumeExpiredRejects(t *testing.T) {
 	if cookie == "" {
 		t.Fatalf("no cookie: %v", setCookies)
 	}
-	c1.Close()
+	_ = c1.Close()
 
 	// CONNECT once (marks the session connected), then disconnect.
 	c2 := dialOC(t, s)
@@ -275,7 +275,7 @@ func TestResumeExpiredRejects(t *testing.T) {
 	if st, _, _, _ := readResp(t, c2); st != 200 {
 		t.Fatalf("first CONNECT: %d", st)
 	}
-	c2.Close()
+	_ = c2.Close()
 
 	// Poll until the session is actually expired: the server must first observe
 	// c2's close (markDisconnected) and then elapse the 1s resume window. A
@@ -305,7 +305,7 @@ func TestResumeExpiredRejects(t *testing.T) {
 	if st != 401 {
 		t.Fatalf("expired resume: status %d, want 401", st)
 	}
-	c3.Close()
+	_ = c3.Close()
 }
 
 // TestRegistryRemoveKeepsSuccessor covers two sessions sharing one client IP

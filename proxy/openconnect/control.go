@@ -23,13 +23,15 @@ import (
 const (
 	// authTimeout bounds how long a control connection may idle during auth.
 	authTimeout = 240 * time.Second
-	// dataMTUOverhead approximates UDP+IP overhead subtracted from the base MTU.
-	dataMTUOverhead = 20
-	// dtlsOverhead conservatively covers the DTLS record header + AEAD tag +
-	// UDP/IP headers + the 1-byte OpenConnect framing. The gVisor NIC MTU is
-	// clamped to baseMTU - dtlsOverhead so outgoing IP packets always fit the
-	// DTLS tunnel (the client's own data MTU is a few bytes larger).
-	dtlsOverhead = 80
+	// dtlsOverhead is the exact wire cost of one CSTP frame inside a DTLS 1.2
+	// AEAD record: 13 record header + 8 explicit nonce + 16 AEAD tag + 1 CSTP
+	// type byte + 20 IPv4 + 8 UDP. Both the advertised X-CSTP-MTU and the
+	// gVisor NIC MTU are baseMTU - dtlsOverhead, so a maximal IP packet in
+	// either direction is a datagram of exactly the base MTU: no outer
+	// fragmentation, and the client-side MSS (X-CSTP-MTU - 40) lines up with
+	// the server-side one — sub-MSS incoming segments no longer split into
+	// two datagrams each (the ~1.4x pps anomaly of the 2026-09-27 report).
+	dtlsOverhead = 66
 	// cstpKeepalive is the keepalive interval advertised to the client and
 	// used by the server-side CSTP keepalive timer (cstpPump).
 	cstpKeepalive = 10
@@ -77,7 +79,7 @@ func (s *Server) acceptLoop() {
 
 // handleControl runs the TLS control channel for one client connection.
 func (s *Server) handleControl(raw net.Conn) {
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	peer := raw.RemoteAddr().String()
 	peerIP := hostFromAddr(raw)
 
@@ -106,7 +108,7 @@ func (s *Server) handleControl(raw net.Conn) {
 		errors.LogDebug(s.ctx, fmt.Sprintf("openconnect: TLS handshake from %s failed: %s", peer, err))
 		return
 	}
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 	kl.setServerRandom(sniff.serverRandom)
 
 	// One bufio.Reader for the whole control connection: reusing it preserves
@@ -118,7 +120,7 @@ func (s *Server) handleControl(raw net.Conn) {
 	// server-wide map keyed by peer IP — and dies with the connection.
 	var pendingUser string
 	for {
-		tc.SetReadDeadline(time.Now().Add(authTimeout))
+		_ = tc.SetReadDeadline(time.Now().Add(authTimeout))
 		req, err := readHTTP(br)
 		if err != nil {
 			return
@@ -179,26 +181,37 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLo
 		return
 	}
 	vals := parseForm(req.body)
+	user, hasUser := vals["username"]
+	pw, hasPw := vals["password"]
 
-	if u, ok := vals["username"]; ok {
+	if hasUser {
 		// User names are short by construction; reject pathologically long
 		// ones outright instead of carrying them around.
-		if len(u) > 255 {
+		if len(user) > 255 {
 			_ = writeHTTP(tc, 401, "text/xml; charset=utf-8", nil, failMsg)
 			return
 		}
-		*pending = u
-		_ = writeHTTP(tc, 200, "text/xml; charset=utf-8", nil, passwdForm)
-		return
 	}
 
-	pw, hasPw := vals["password"]
-	if !hasPw {
+	switch {
+	case hasUser && hasPw:
+		// ocserv parity: the main form asks for username and password
+		// together, and clients (libopenconnect also re-sends the username
+		// with the password-only form) submit both in one POST —
+		// authenticate in a single round instead of re-asking.
+	case hasUser:
+		// Split flow: stage the username; the password POST arrives on this
+		// same TLS connection.
+		*pending = user
+		_ = writeHTTP(tc, 200, "text/xml; charset=utf-8", nil, passwdForm)
+		return
+	case hasPw:
+		user = *pending
+	default:
 		_ = writeHTTP(tc, 200, "text/xml; charset=utf-8", nil, loginForm)
 		return
 	}
 
-	user := *pending
 	if user == "" || !s.users.check(user, pw) {
 		s.limiter.recordFailure(peerIP)
 		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: auth failed for %q from %s", user, peerIP))
@@ -334,7 +347,7 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 			return
 		default:
 		}
-		tc.SetReadDeadline(time.Now().Add(ka))
+		_ = tc.SetReadDeadline(time.Now().Add(ka))
 		typ, payload, err := readCSTPFrame(tc, br, buf)
 		if err != nil {
 			if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
@@ -370,7 +383,7 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 				sess.dtlsConn = nil
 				sess.dtlsWriter = s.device.register(sess.ip, deviceWriter)
 				sess.mu.Unlock()
-				stale.Close()
+				_ = stale.Close()
 				errors.LogInfo(s.ctx, "openconnect: CSTP data with live DTLS for ", sess.ip, ", falling back to CSTP writer")
 			} else {
 				sess.mu.Unlock()
@@ -475,7 +488,7 @@ func (s *Server) connectHeaders(sess *ocSession) map[string][]string {
 		"X-CSTP-Address":     {sess.ip.String()},
 		"X-CSTP-Netmask":     {s.registry.pool.netmask()},
 		"X-CSTP-Base-MTU":    {strconv.FormatUint(uint64(baseMTU), 10)},
-		"X-CSTP-MTU":         {strconv.FormatUint(uint64(baseMTU-dataMTUOverhead), 10)},
+		"X-CSTP-MTU":         {strconv.FormatUint(uint64(baseMTU-dtlsOverhead), 10)},
 		"X-CSTP-Keepalive":   {strconv.Itoa(cstpKeepalive)},
 		"X-CSTP-DPD":         {strconv.FormatUint(uint64(dpd), 10)},
 		"X-CSTP-Rekey-Time":  {"0"},
@@ -536,27 +549,38 @@ func hostFromAddr(c net.Conn) string {
 	return host
 }
 
-// Forms mirror ocserv src/worker-auth.c constants.
+// Forms mirror ocserv src/worker-auth.c (OC_LOGIN_*, oc_success_msg_*): the
+// main form carries username AND password — AnyConnect/mobile clients submit
+// both in one POST and expect to authenticate in a single round; the
+// password-only form is the second stage of the split flow and is still
+// wrapped in <config-auth> with auth id="main" (id="passwd" is a v3-client
+// special case in ocserv that regular clients do not expect).
 const loginForm = `<?xml version="1.0" encoding="UTF-8"?>
 <config-auth client="vpn" type="auth-request">
+<version who="sg">0.1(1)</version>
 <auth id="main">
 <message>Please enter your username and password.</message>
 <form method="post" action="/auth">
 <input type="text" name="username" label="Username:" />
+<input type="password" name="password" label="Password:" />
 </form></auth>
 </config-auth>`
 
 const passwdForm = `<?xml version="1.0" encoding="UTF-8"?>
-<auth id="passwd">
+<config-auth client="vpn" type="auth-request">
+<version who="sg">0.1(1)</version>
+<auth id="main">
 <message>Please enter your password.</message>
 <form method="post" action="/auth">
 <input type="password" name="password" label="Password:" />
-</form></auth>`
+</form></auth>
+</config-auth>`
 
 const successMsg = `<?xml version="1.0" encoding="UTF-8"?>
+<config-auth client="vpn" type="complete">
+<version who="sg">0.1(1)</version>
 <auth id="success">
-<title>SSL VPN Service</title>
-</auth>
+<title>SSL VPN Service</title></auth></config-auth>
 `
 
 const failMsg = `<?xml version="1.0" encoding="UTF-8"?>

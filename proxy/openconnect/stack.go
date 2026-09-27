@@ -347,7 +347,7 @@ type ocHandler struct {
 
 // HandleConnection dispatches one gVisor-demuxed TCP/UDP flow.
 func (h *ocHandler) HandleConnection(conn net.Conn, destination xnet.Destination) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	ctx, cancel := context.WithCancel(h.ctx)
 	defer cancel()
