@@ -485,16 +485,21 @@ func (s *Server) connectHeaders(sess *ocSession) map[string][]string {
 		udpPort = int(s.conf.DtlsPort)
 	}
 	hdrs := map[string][]string{
-		"X-CSTP-Address":     {sess.ip.String()},
-		"X-CSTP-Netmask":     {s.registry.pool.netmask()},
-		"X-CSTP-Base-MTU":    {strconv.FormatUint(uint64(baseMTU), 10)},
-		"X-CSTP-MTU":         {strconv.FormatUint(uint64(baseMTU-dtlsOverhead), 10)},
-		"X-CSTP-Keepalive":   {strconv.Itoa(cstpKeepalive)},
-		"X-CSTP-DPD":         {strconv.FormatUint(uint64(dpd), 10)},
-		"X-CSTP-Rekey-Time":  {"0"},
-		"X-DTLS-Port":        {strconv.Itoa(udpPort)},
-		"X-DTLS-App-ID":      {sess.appID},
-		"X-DTLS-CipherSuite": {"PSK-NEGOTIATE"},
+		"X-CSTP-Address":    {sess.ip.String()},
+		"X-CSTP-Netmask":    {s.registry.pool.netmask()},
+		"X-CSTP-Base-MTU":   {strconv.FormatUint(uint64(baseMTU), 10)},
+		"X-CSTP-MTU":        {strconv.FormatUint(uint64(baseMTU-dtlsOverhead), 10)},
+		"X-CSTP-Keepalive":  {strconv.Itoa(cstpKeepalive)},
+		"X-CSTP-DPD":        {strconv.FormatUint(uint64(dpd), 10)},
+		"X-CSTP-Rekey-Time": {"0"},
+	}
+	// DTLS offer is group-gated: omitting the X-DTLS-* headers keeps the
+	// client CSTP-only (ocserv without DTLS behaves the same), for groups
+	// where UDP is throttled anyway.
+	if s.conf.dtlsFor(sess.user) {
+		hdrs["X-DTLS-Port"] = []string{strconv.Itoa(udpPort)}
+		hdrs["X-DTLS-App-ID"] = []string{sess.appID}
+		hdrs["X-DTLS-CipherSuite"] = []string{"PSK-NEGOTIATE"}
 	}
 	if len(s.conf.Dns) > 0 {
 		hdrs["X-CSTP-DNS"] = []string{strings.Join(s.conf.Dns, ",")}

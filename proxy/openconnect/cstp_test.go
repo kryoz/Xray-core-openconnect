@@ -97,6 +97,66 @@ func sidFromCookie(t *testing.T, s *Server, cookie string) [32]byte {
 	return sid
 }
 
+// connectHeadersFor drives the auth forms and CONNECT, returning the CONNECT
+// response headers (lower-cased keys).
+func connectHeadersFor(t *testing.T, s *Server) map[string]string {
+	t.Helper()
+	c1 := dialOC(t, s)
+	writeReq(c1, "POST", "/auth", `<config-auth><auth><username>testuser</username></auth></config-auth>`, "")
+	readResp(t, c1)
+	writeReq(c1, "POST", "/auth", `<config-auth><auth><password>testpass</password></auth></config-auth>`, "")
+	_, _, setCookies, _ := readResp(t, c1)
+	cookie := cookieValue(setCookies)
+	if cookie == "" {
+		t.Fatalf("no cookie in %v", setCookies)
+	}
+	_ = c1.Close()
+
+	c2 := dialOC(t, s)
+	writeReq(c2, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
+	st, hdrs, _, _ := readResp(t, c2)
+	if st != 200 {
+		t.Fatalf("CONNECT status %d, want 200", st)
+	}
+	_ = c2.Close()
+	return hdrs
+}
+
+// TestConnectHeadersGroupDTLS verifies the group-level DTLS kill switch on
+// the control channel: users of a dtls:false group get a CSTP-only CONNECT
+// response (no X-DTLS-* headers, group split-routes intact), while a group
+// without the flag and a user without a group keep the DTLS offer.
+func TestConnectHeadersGroupDTLS(t *testing.T) {
+	no := false
+	s := newTestServer(t)
+	s.conf.Groups = []*Group{{Name: "mobile", Routes: []string{"10.0.0.0/8"}, Dtls: &no}}
+	s.conf.Users[0].Group = "mobile"
+	hdrs := connectHeadersFor(t, s)
+	for _, h := range []string{"x-dtls-port", "x-dtls-app-id", "x-dtls-ciphersuite"} {
+		if _, ok := hdrs[h]; ok {
+			t.Errorf("%s advertised to dtls:false group", h)
+		}
+	}
+	if hdrs["x-cstp-address"] == "" || hdrs["x-cstp-mtu"] == "" {
+		t.Error("CSTP headers missing from CONNECT response")
+	}
+	if got := hdrs["x-cstp-split-include"]; got != "10.0.0.0/8" {
+		t.Errorf("group split route = %q, want 10.0.0.0/8", got)
+	}
+
+	s2 := newTestServer(t)
+	s2.conf.Groups = []*Group{{Name: "corp", Routes: []string{"10.0.0.0/8"}}}
+	s2.conf.Users[0].Group = "corp"
+	if hdrs := connectHeadersFor(t, s2); hdrs["x-dtls-port"] == "" {
+		t.Error("X-DTLS-Port missing for group without the dtls flag")
+	}
+
+	s3 := newTestServer(t)
+	if hdrs := connectHeadersFor(t, s3); hdrs["x-dtls-port"] == "" {
+		t.Error("X-DTLS-Port missing for user without a group")
+	}
+}
+
 // TestCSTPKeepaliveDPDAndData verifies the CSTP/TCP channel after CONNECT:
 // the server sends AC_PKT_KEEPALIVE on idle (the NAT/CGNAT fix), answers
 // client DPD_OUT, passes DATA both ways, and closes on client DISCONNECT.

@@ -28,6 +28,12 @@ message User {
 message Group {
   string name = 1;
   repeated string routes = 2;
+  // DTLS data-channel offer for this group's users. When false, the CONNECT
+  // response omits the X-DTLS-* headers and UDP ClientHellos are silently
+  // dropped, keeping the group on the CSTP/TCP path (e.g. mobile carriers
+  // throttling UDP would otherwise cause an endless DTLS↔CSTP ping-pong).
+  // Unset = true (DTLS offered, backwards compatible).
+  optional bool dtls = 3;
 }
 
 message OpenConnectInboundConfig {

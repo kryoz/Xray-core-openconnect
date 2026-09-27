@@ -11,6 +11,39 @@ import (
 	"github.com/pion/dtls/v3"
 )
 
+// TestClientHelloIgnoredForNoDTLSGroup covers the group-level DTLS kill
+// switch on the UDP path: a ClientHello mapped to a session of a dtls:false
+// group is silently dropped — no pipe, no handshake goroutine.
+func TestClientHelloIgnoredForNoDTLSGroup(t *testing.T) {
+	s := newTestServer(t)
+	no := false
+	s.conf.Groups = []*Group{{Name: "mobile", Dtls: &no}}
+	s.conf.Users[0].Group = "mobile"
+	tc, _, sess := ocConnectAs(t, s, "testuser", "testpass")
+	defer func() { _ = tc.Close() }()
+
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer func() { _ = pc.Close() }()
+	ch := buildClientHello(nil, appIDExtension(sess.appID))
+	udpAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(s.conf.DtlsPort)}
+	if _, err := pc.WriteTo(ch, udpAddr); err != nil {
+		t.Fatalf("send ClientHello: %v", err)
+	}
+
+	// A pipe for this source would appear within milliseconds of the write
+	// and live until the 30s handshake timeout; a fixed grace is enough.
+	time.Sleep(200 * time.Millisecond)
+	s.dmuMu.Lock()
+	_, hasPipe := s.pipes[pc.LocalAddr().String()]
+	s.dmuMu.Unlock()
+	if hasPipe {
+		t.Fatal("ClientHello of a no-dtls group session created a DTLS pipe")
+	}
+}
+
 // TestSessionConnWritesToReboundAddr covers the NAT-rebinding write target:
 // pion/dtls caches the handshake-time peer address and never re-learns it
 // without Connection IDs, so sessionConn.WriteTo must write to the pipe's
