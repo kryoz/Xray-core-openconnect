@@ -421,6 +421,62 @@ func TestConnectSplitRoutes(t *testing.T) {
 	}
 }
 
+// TestConnectSplitExclude verifies group no-route exclusions are advertised
+// as X-CSTP-Split-Exclude lines. With split routing the default-route
+// exclusion 0.0.0.0/0 is the signal a split-routing router needs to send
+// anything outside the include set via its own gateway; exclusions are also
+// sent without any include (ocserv full-tunnel-minus-subnets parity).
+func TestConnectSplitExclude(t *testing.T) {
+	s := newTestServer(t)
+	s.conf.Groups = []*Group{{
+		Name:     "split",
+		Routes:   []string{"10.50.0.0/16"},
+		NoRoutes: []string{"0.0.0.0/0", "192.168.100.0/24"},
+	}}
+	s.conf.Users[0].Group = "split"
+
+	c1 := dialOC(t, s)
+	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>testuser</username></auth></config-auth>`, "")
+	readResp(t, c1)
+	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><password>testpass</password></auth></config-auth>`, "")
+	_, _, setCookies, _ := readResp(t, c1)
+	cookie := cookieValue(setCookies)
+	_ = c1.Close()
+
+	c2 := dialOC(t, s)
+	defer func() { _ = c2.Close() }()
+	writeReq(c2, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
+	raw := readRawHead(t, c2)
+	if !strings.Contains(raw, "X-CSTP-Split-Include: 10.50.0.0/16\r\n") {
+		t.Errorf("missing include route in CONNECT response:\n%s", raw)
+	}
+	for _, want := range []string{"0.0.0.0/0", "192.168.100.0/24"} {
+		if !strings.Contains(raw, "X-CSTP-Split-Exclude: "+want+"\r\n") {
+			t.Errorf("missing exclude route %s in CONNECT response:\n%s", want, raw)
+		}
+	}
+
+	// Exclusions are sent even with no include routes (ocserv parity).
+	s2 := newTestServer(t)
+	s2.conf.Groups = []*Group{{Name: "exclude", NoRoutes: []string{"0.0.0.0/0"}}}
+	s2.conf.Users[0].Group = "exclude"
+	c3 := dialOC(t, s2)
+	writeReq(c3, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>testuser</username></auth></config-auth>`, "")
+	readResp(t, c3)
+	writeReq(c3, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><password>testpass</password></auth></config-auth>`, "")
+	_, _, setCookies, _ = readResp(t, c3)
+	cookie = cookieValue(setCookies)
+	_ = c3.Close()
+
+	c4 := dialOC(t, s2)
+	defer func() { _ = c4.Close() }()
+	writeReq(c4, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
+	raw = readRawHead(t, c4)
+	if !strings.Contains(raw, "X-CSTP-Split-Exclude: 0.0.0.0/0\r\n") {
+		t.Errorf("missing exclude route in full-tunnel CONNECT response:\n%s", raw)
+	}
+}
+
 // TestConnectPerUserRoutes verifies per-user split-routing: a user with
 // non-empty routes gets them instead of the inbound-level policy, while a
 // user without routes inherits the inbound policy.

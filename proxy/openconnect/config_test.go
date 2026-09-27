@@ -192,6 +192,18 @@ func TestValidate(t *testing.T) {
 	if err := c.validate(); err == nil {
 		t.Error("expected error for bad group route")
 	}
+	c.Groups = []*Group{{Name: "split", NoRoutes: []string{"0.0.0.0/0", "192.168.1.0/24"}}}
+	if err := c.validate(); err != nil {
+		t.Errorf("group no_routes should be accepted: %v", err)
+	}
+	c.Groups = []*Group{{Name: "split", NoRoutes: []string{"bogus"}}}
+	if err := c.validate(); err == nil {
+		t.Error("expected error for bad group no_route")
+	}
+	c.Groups = []*Group{{Name: "split", NoRoutes: []string{"fd00::/8"}}}
+	if err := c.validate(); err == nil {
+		t.Error("expected error for IPv6 group no_route")
+	}
 	c.Groups = []*Group{{Name: "split"}}
 	c.Users[0].Group = "nope"
 	if err := c.validate(); err == nil {

@@ -15,9 +15,10 @@ type OpenConnectUserConfig struct {
 }
 
 type OpenConnectGroupConfig struct {
-	Name   string   `json:"name"`
-	Routes []string `json:"routes"`
-	Dtls   *bool    `json:"dtls,omitempty"`
+	Name     string   `json:"name"`
+	Routes   []string `json:"routes"`
+	NoRoutes []string `json:"noRoutes,omitempty"`
+	Dtls     *bool    `json:"dtls,omitempty"`
 }
 
 type OpenConnectConfig struct {
@@ -67,9 +68,10 @@ func (c *OpenConnectConfig) Build() (proto.Message, error) {
 	config.Groups = make([]*openconnect.Group, len(c.Groups))
 	for i := range c.Groups {
 		config.Groups[i] = &openconnect.Group{
-			Name:   c.Groups[i].Name,
-			Routes: c.Groups[i].Routes,
-			Dtls:   c.Groups[i].Dtls,
+			Name:     c.Groups[i].Name,
+			Routes:   c.Groups[i].Routes,
+			NoRoutes: c.Groups[i].NoRoutes,
+			Dtls:     c.Groups[i].Dtls,
 		}
 	}
 	return config, nil
