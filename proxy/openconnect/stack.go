@@ -74,12 +74,23 @@ func newOCDevice(mtu uint32) *ocDevice {
 
 // ocWriter wraps one framed writer with an identity, so unregisterIf can tell
 // a stale session's writer from the live one occupying the same virtual IP.
+// batch, when non-nil, receives the frames of one gVisor flush as a single
+// call so a DTLS writer can pack several records into one datagram; f remains
+// the single-frame path (CSTP writers leave batch nil).
 type ocWriter struct {
-	f func([]byte) error
+	f     func([]byte) error
+	batch func([][]byte) error
 }
 
 func (d *ocDevice) register(virtIP netip.Addr, w func([]byte) error) *ocWriter {
-	t := &ocWriter{f: w}
+	return d.set(virtIP, &ocWriter{f: w})
+}
+
+func (d *ocDevice) registerBatch(virtIP netip.Addr, w func([]byte) error, batch func([][]byte) error) *ocWriter {
+	return d.set(virtIP, &ocWriter{f: w, batch: batch})
+}
+
+func (d *ocDevice) set(virtIP netip.Addr, t *ocWriter) *ocWriter {
 	d.mu.Lock()
 	d.tunnels[virtIP] = t
 	d.mu.Unlock()
@@ -125,12 +136,12 @@ func (d *ocDevice) ReadPacket() (byte, *stack.PacketBuffer, error) {
 	}
 }
 
-// WritePacket implements the device write path (server→client).
-func (d *ocDevice) WritePacket(packet *stack.PacketBuffer) tcpip.Error {
-	// AsSlices() yields the complete packet including IP/UDP headers; Data()
-	// would only cover the payload and lose the destination address. One
-	// allocation builds the framed [acPKTData]+IP record the tunnel writer
-	// consumes — the hottest downlink path.
+// frame builds the [acPKTData]+IP wire frame for one outgoing packet and
+// returns its destination virtual IP. AsSlices() yields the complete packet
+// including IP/UDP headers; Data() would only cover the payload and lose the
+// destination address. One allocation builds the record the tunnel writer
+// consumes — the hottest downlink path.
+func (d *ocDevice) frame(packet *stack.PacketBuffer) ([]byte, netip.Addr) {
 	framed := make([]byte, 1+int(packet.Size()))
 	framed[0] = acPKTData
 	off := 1
@@ -138,7 +149,13 @@ func (d *ocDevice) WritePacket(packet *stack.PacketBuffer) tcpip.Error {
 		off += copy(framed[off:], s)
 	}
 	framed = framed[:off]
-	destIP := ocDestIP(framed[1:])
+	return framed, ocDestIP(framed[1:])
+}
+
+// WritePacket implements the device write path (server→client) for a single
+// packet.
+func (d *ocDevice) WritePacket(packet *stack.PacketBuffer) tcpip.Error {
+	framed, destIP := d.frame(packet)
 	if !destIP.IsValid() {
 		return nil
 	}
@@ -298,12 +315,42 @@ func ocSrcIP(payload []byte) netip.Addr {
 }
 
 func (e *ocLinkEndpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Error) {
+	d := e.device
 	var n int
+	var downlinkBytes int
+	// One gVisor flush can carry frames for several clients (they share the
+	// NIC), so group by tunnel writer: a batch-capable DTLS writer sends its
+	// frames in one WriteBatch (several records per datagram), CSTP writers
+	// and single-frame drops keep the per-frame path.
+	batches := make(map[*ocWriter][][]byte)
 	for _, pb := range list.AsSlice() {
-		if err := e.device.WritePacket(pb); err != nil {
+		framed, dest := d.frame(pb)
+		if !dest.IsValid() {
+			n++
+			continue
+		}
+		d.mu.RLock()
+		w := d.tunnels[dest]
+		d.mu.RUnlock()
+		if w == nil {
+			n++ // drop: no tunnel for this destination
+			continue
+		}
+		if w.batch != nil {
+			batches[w] = append(batches[w], framed)
+		} else if err := w.f(framed); err != nil {
 			return n, &tcpip.ErrAborted{}
 		}
+		downlinkBytes += len(framed) - 1
 		n++
+	}
+	for w, frames := range batches {
+		if err := w.batch(frames); err != nil {
+			return n, &tcpip.ErrAborted{}
+		}
+	}
+	if d.downlinkCounter != nil && downlinkBytes > 0 {
+		d.downlinkCounter.Add(int64(downlinkBytes))
 	}
 	return n, nil
 }

@@ -41,6 +41,12 @@ require (
 	mvdan.cc/gofumpt v0.12.0
 )
 
+// kryoz/dtls is a fork of pion/dtls v3.1.9 carrying two openconnect-inbound
+// patches: WithLegacyClientHello (accept a DTLS 1.0 client_version from
+// OpenSSL-built clients) and Conn.WriteBatch (pack several records into one
+// datagram). Kept as a replace until the patches land upstream.
+replace github.com/pion/dtls/v3 => github.com/kryoz/dtls/v3 v3.1.9-xray1
+
 require (
 	github.com/andybalholm/brotli v1.0.6 // indirect
 	github.com/google/btree v1.1.2 // indirect

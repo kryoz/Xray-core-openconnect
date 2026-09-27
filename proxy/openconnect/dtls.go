@@ -224,6 +224,9 @@ func (s *Server) startDTLSSession(sess *ocSession, pipe *ocPipe, addr *net.UDPAd
 		}),
 		dtls.WithPSKIdentityHint([]byte(pskNegotiate)),
 		dtls.WithCipherSuites(suites...),
+		// OpenSSL-built openconnect clients send a DTLS 1.0 client_version
+		// (fake SSL_SESSION quirk); accept it and still negotiate 1.2.
+		dtls.WithLegacyClientHello(),
 	)
 	if err != nil {
 		s.dropPipe(sess, pipe)
@@ -242,9 +245,14 @@ func (s *Server) startDTLSSession(sess *ocSession, pipe *ocPipe, addr *net.UDPAd
 		_, err := dc.Write(framed)
 		return err
 	}
+	// Batch the frames of one gVisor flush into a single WriteBatch: pion
+	// packs several records into one datagram, cutting a sendto per record.
+	batchWriter := func(frames [][]byte) error {
+		return dc.WriteBatch(frames)
+	}
 	sess.mu.Lock()
 	sess.dtlsConn = dc
-	sess.dtlsWriter = s.device.register(sess.ip, dtlsWriter)
+	sess.dtlsWriter = s.device.registerBatch(sess.ip, dtlsWriter, batchWriter)
 	sess.mu.Unlock()
 	errors.LogInfo(s.ctx, "openconnect: DTLS established for ", sess.ip)
 	sess.touchActivity()
