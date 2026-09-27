@@ -125,7 +125,13 @@ type Group struct {
 	// dropped, keeping the group on the CSTP/TCP path (e.g. mobile carriers
 	// throttling UDP would otherwise cause an endless DTLS↔CSTP ping-pong).
 	// Unset = true (DTLS offered, backwards compatible).
-	Dtls          *bool `protobuf:"varint,3,opt,name=dtls,proto3,oneof" json:"dtls,omitempty"`
+	Dtls *bool `protobuf:"varint,3,opt,name=dtls,proto3,oneof" json:"dtls,omitempty"`
+	// Split-routing exclusions (IPv4 CIDR) advertised to the client as
+	// X-CSTP-Split-Exclude, mirroring ocserv's no-route directive. With split
+	// routing, no_routes = ["0.0.0.0/0"] tells the client to send everything
+	// not matched by X-CSTP-Split-Include out its own gateway instead of the
+	// tunnel. Exclusions are sent regardless of split mode (ocserv parity).
+	NoRoutes      []string `protobuf:"bytes,4,rep,name=no_routes,json=noRoutes,proto3" json:"no_routes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -179,6 +185,13 @@ func (x *Group) GetDtls() bool {
 		return *x.Dtls
 	}
 	return false
+}
+
+func (x *Group) GetNoRoutes() []string {
+	if x != nil {
+		return x.NoRoutes
+	}
+	return nil
 }
 
 type OpenConnectInboundConfig struct {
@@ -369,11 +382,12 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\x02ip\x18\x03 \x01(\tR\x02ip\x12\x16\n" +
 	"\x06routes\x18\x04 \x03(\tR\x06routes\x12\x14\n" +
 	"\x05group\x18\x05 \x01(\tR\x05group\x12\x0e\n" +
-	"\x02l3\x18\x06 \x01(\bR\x02l3\"U\n" +
+	"\x02l3\x18\x06 \x01(\bR\x02l3\"r\n" +
 	"\x05Group\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06routes\x18\x02 \x03(\tR\x06routes\x12\x17\n" +
-	"\x04dtls\x18\x03 \x01(\bH\x00R\x04dtls\x88\x01\x01B\a\n" +
+	"\x04dtls\x18\x03 \x01(\bH\x00R\x04dtls\x88\x01\x01\x12\x1b\n" +
+	"\tno_routes\x18\x04 \x03(\tR\bnoRoutesB\a\n" +
 	"\x05_dtls\"\xf8\x03\n" +
 	"\x18OpenConnectInboundConfig\x122\n" +
 	"\x05users\x18\x01 \x03(\v2\x1c.xray.proxy.openconnect.UserR\x05users\x12\x16\n" +

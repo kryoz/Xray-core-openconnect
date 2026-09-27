@@ -510,6 +510,13 @@ func (s *Server) connectHeaders(sess *ocSession) map[string][]string {
 	if routes := s.conf.routesFor(sess.user); len(routes) > 0 {
 		hdrs["X-CSTP-Split-Include"] = routes
 	}
+	// Split exclusions (no-route) are advertised unconditionally, matching
+	// ocserv: X-CSTP-Split-Exclude: 0.0.0.0/0 is the signal a split-routing
+	// router uses to send anything outside X-CSTP-Split-Include via its own
+	// gateway rather than the tunnel. They come from the user's group.
+	if noRoutes := s.conf.noRoutesFor(sess.user); len(noRoutes) > 0 {
+		hdrs["X-CSTP-Split-Exclude"] = noRoutes
+	}
 	// No X-DTLS-Content-Encoding: ocserv omits it when compression is off.
 	return hdrs
 }

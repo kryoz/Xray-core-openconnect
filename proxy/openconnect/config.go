@@ -86,6 +86,11 @@ func (c *OpenConnectInboundConfig) validate() error {
 				return errors.New("route group ", g.Name, ": ").Base(err).AtError()
 			}
 		}
+		for _, r := range g.NoRoutes {
+			if err := validateRoute(r); err != nil {
+				return errors.New("route group ", g.Name, ": ").Base(err).AtError()
+			}
+		}
 		groupNames[g.Name] = struct{}{}
 	}
 	seen := make(map[string]struct{}, len(c.Users))
@@ -181,6 +186,21 @@ func (c *OpenConnectInboundConfig) routesFor(u *User) []string {
 		return c.Routes
 	}
 	return out
+}
+
+// noRoutesFor resolves the split-routing exclusions for a user's session:
+// the no-route networks of the user's group, if any. Exclusions live on the
+// group (not the inbound), so a user without a group has none.
+func (c *OpenConnectInboundConfig) noRoutesFor(u *User) []string {
+	if u == nil || u.Group == "" {
+		return nil
+	}
+	for _, g := range c.Groups {
+		if g.Name == u.Group {
+			return g.NoRoutes
+		}
+	}
+	return nil
 }
 
 // dtlsFor reports whether the DTLS data channel is offered to a user's

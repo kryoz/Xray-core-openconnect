@@ -34,6 +34,12 @@ message Group {
   // throttling UDP would otherwise cause an endless DTLS↔CSTP ping-pong).
   // Unset = true (DTLS offered, backwards compatible).
   optional bool dtls = 3;
+  // Split-routing exclusions (IPv4 CIDR) advertised to the client as
+  // X-CSTP-Split-Exclude, mirroring ocserv's no-route directive. With split
+  // routing, no_routes = ["0.0.0.0/0"] tells the client to send everything
+  // not matched by X-CSTP-Split-Include out its own gateway instead of the
+  // tunnel. Exclusions are sent regardless of split mode (ocserv parity).
+  repeated string no_routes = 4;
 }
 
 message OpenConnectInboundConfig {
