@@ -183,6 +183,23 @@ func (c *OpenConnectInboundConfig) routesFor(u *User) []string {
 	return out
 }
 
+// dtlsFor reports whether the DTLS data channel is offered to a user's
+// sessions: the group's dtls flag when the user belongs to a group that sets
+// it, true otherwise (user without a group, group without the flag —
+// backwards compatible). Note: the generated Group.GetDtls cannot be used
+// here, it returns false for an unset field.
+func (c *OpenConnectInboundConfig) dtlsFor(u *User) bool {
+	if u == nil || u.Group == "" {
+		return true
+	}
+	for _, g := range c.Groups {
+		if g.Name == u.Group {
+			return g.Dtls == nil || *g.Dtls
+		}
+	}
+	return true
+}
+
 // validateRoute checks one split-routing network: IPv4 CIDR.
 func validateRoute(r string) error {
 	p, err := netip.ParsePrefix(r)

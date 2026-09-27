@@ -117,9 +117,15 @@ func (x *User) GetL3() bool {
 
 // Group is a named set of split-routing networks shared by users.
 type Group struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Routes        []string               `protobuf:"bytes,2,rep,name=routes,proto3" json:"routes,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Name   string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Routes []string               `protobuf:"bytes,2,rep,name=routes,proto3" json:"routes,omitempty"`
+	// DTLS data-channel offer for this group's users. When false, the CONNECT
+	// response omits the X-DTLS-* headers and UDP ClientHellos are silently
+	// dropped, keeping the group on the CSTP/TCP path (e.g. mobile carriers
+	// throttling UDP would otherwise cause an endless DTLS↔CSTP ping-pong).
+	// Unset = true (DTLS offered, backwards compatible).
+	Dtls          *bool `protobuf:"varint,3,opt,name=dtls,proto3,oneof" json:"dtls,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -166,6 +172,13 @@ func (x *Group) GetRoutes() []string {
 		return x.Routes
 	}
 	return nil
+}
+
+func (x *Group) GetDtls() bool {
+	if x != nil && x.Dtls != nil {
+		return *x.Dtls
+	}
+	return false
 }
 
 type OpenConnectInboundConfig struct {
@@ -356,10 +369,12 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\x02ip\x18\x03 \x01(\tR\x02ip\x12\x16\n" +
 	"\x06routes\x18\x04 \x03(\tR\x06routes\x12\x14\n" +
 	"\x05group\x18\x05 \x01(\tR\x05group\x12\x0e\n" +
-	"\x02l3\x18\x06 \x01(\bR\x02l3\"3\n" +
+	"\x02l3\x18\x06 \x01(\bR\x02l3\"U\n" +
 	"\x05Group\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
-	"\x06routes\x18\x02 \x03(\tR\x06routes\"\xf8\x03\n" +
+	"\x06routes\x18\x02 \x03(\tR\x06routes\x12\x17\n" +
+	"\x04dtls\x18\x03 \x01(\bH\x00R\x04dtls\x88\x01\x01B\a\n" +
+	"\x05_dtls\"\xf8\x03\n" +
 	"\x18OpenConnectInboundConfig\x122\n" +
 	"\x05users\x18\x01 \x03(\v2\x1c.xray.proxy.openconnect.UserR\x05users\x12\x16\n" +
 	"\x06subnet\x18\x02 \x01(\tR\x06subnet\x12\x10\n" +
@@ -413,6 +428,7 @@ func file_proxy_openconnect_config_proto_init() {
 	if File_proxy_openconnect_config_proto != nil {
 		return
 	}
+	file_proxy_openconnect_config_proto_msgTypes[1].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

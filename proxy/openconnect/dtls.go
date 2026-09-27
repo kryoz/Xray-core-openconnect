@@ -144,6 +144,12 @@ func (s *Server) routeUDPPacket(data []byte, ua *net.UDPAddr) {
 			errors.LogWarning(s.ctx, "openconnect: ClientHello from ", ua, " matches no session (appID=", appID, "), dropping")
 			return
 		}
+		// Group with DTLS disabled: the client never received the X-DTLS-*
+		// headers, so a ClientHello here is UDP throttling noise. Drop it
+		// silently — a per-packet warning would spam the log.
+		if !s.conf.dtlsFor(sess.user) {
+			return
+		}
 		pipe := newOCPipe(ua)
 		s.pipes[key] = pipe
 		sess.pipe = pipe
