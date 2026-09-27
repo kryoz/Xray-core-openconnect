@@ -3,6 +3,7 @@ package openconnect
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net"
 	"testing"
 )
 
@@ -50,6 +51,41 @@ func validConfig(t *testing.T) *OpenConnectInboundConfig {
 	}
 }
 
+// The MTU math that fixed the 2026-09-27 pps anomaly: both tunnel MTUs
+// (advertised X-CSTP-MTU and gVisor NIC) must be base−dtlsOverhead, so a
+// maximal IP packet is a datagram of exactly the base MTU and both sides'
+// MSS values line up (client MSS = X-CSTP-MTU−40).
+func TestMTUMath(t *testing.T) {
+	base := uint32(1500)
+	if got := dataMTUOf(base); got != base-dtlsOverhead {
+		t.Errorf("dataMTUOf(%d) = %d, want %d", base, got, base-dtlsOverhead)
+	}
+	if got := dataMTUOf(dtlsOverhead - 1); got != dtlsOverhead-1 {
+		t.Errorf("dataMTUOf below overhead should pass through, got %d", got)
+	}
+	// Client MSS (X-CSTP-MTU−40) must reach a typical incoming segment size
+	// (~1380 from a 1420-MTU wg path): 1500−66−40 = 1394.
+	if mss := int(base - dtlsOverhead - 40); mss < 1380 {
+		t.Errorf("client MSS %d below 1380: sub-MSS segments would split", mss)
+	}
+}
+
+func TestIfaceMTUOf(t *testing.T) {
+	if got := ifaceMTUOf(nil); got != 0 {
+		t.Errorf("ifaceMTUOf(nil) = %d, want 0", got)
+	}
+	if got := ifaceMTUOf(net.IPv4zero); got != 0 {
+		t.Errorf("ifaceMTUOf(unspecified) = %d, want 0", got)
+	}
+	if got := ifaceMTUOf(net.IPv4(127, 0, 0, 1)); got == 0 {
+		t.Error("ifaceMTUOf(127.0.0.1) = 0, want the loopback MTU")
+	}
+	// TEST-NET-3: no interface holds this address.
+	if got := ifaceMTUOf(net.IPv4(203, 0, 113, 1)); got != 0 {
+		t.Errorf("ifaceMTUOf(unassigned) = %d, want 0", got)
+	}
+}
+
 func TestValidate(t *testing.T) {
 	if err := validConfig(t).validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
@@ -77,6 +113,20 @@ func TestValidate(t *testing.T) {
 	c.Mtu = 100
 	if err := c.validate(); err == nil {
 		t.Error("expected error for mtu below min")
+	}
+
+	c = validConfig(t)
+	c.Cipher = "rot13"
+	if err := c.validate(); err == nil {
+		t.Error("expected error for unknown cipher")
+	}
+
+	for _, ok := range []string{"", "auto", "aes128gcm", "chacha20poly1305"} {
+		c = validConfig(t)
+		c.Cipher = ok
+		if err := c.validate(); err != nil {
+			t.Errorf("cipher %q: unexpected error: %v", ok, err)
+		}
 	}
 
 	c = validConfig(t)

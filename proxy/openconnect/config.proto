@@ -35,7 +35,8 @@ message OpenConnectInboundConfig {
   // Virtual address pool, e.g. "10.66.0.0/24".
   string subnet = 2;
   repeated string dns = 3;
-  // Base MTU advertised to the client. Default 1400.
+  // Base MTU advertised to the client. Default 1500, clamped down to the
+  // listen interface's MTU.
   uint32 mtu = 4;
   // Dead-peer detection interval in seconds. Default 90.
   uint32 dpd = 5;
@@ -60,4 +61,10 @@ message OpenConnectInboundConfig {
   string camouflage_realm = 13;
   // Named route groups referenced by User.group.
   repeated Group groups = 14;
+  // DTLS cipher suite offer. "auto" (default) offers both
+  // TLS_PSK_WITH_AES_128_GCM_SHA256 and TLS_PSK_WITH_CHACHA20_POLY1305_SHA256
+  // and the client picks by its own preference; "aes128gcm" or
+  // "chacha20poly1305" pin one suite (AES-GCM is several times cheaper per
+  // byte on AES-NI hosts).
+  string cipher = 15;
 }

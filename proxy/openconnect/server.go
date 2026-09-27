@@ -3,6 +3,7 @@ package openconnect
 import (
 	"context"
 	"crypto/tls"
+	stdnet "net"
 	"net/netip"
 	"sync"
 
@@ -27,8 +28,9 @@ type Server struct {
 	policyManager policy.Manager
 	dispatcher    routing.Dispatcher
 
-	tag string
-	src net.Destination
+	tag     string
+	src     net.Destination
+	baseMTU uint32
 
 	cert     tls.Certificate
 	registry *sessionRegistry
@@ -97,8 +99,18 @@ func NewServer(ctx context.Context, conf *OpenConnectInboundConfig) (*Server, er
 	bg := core.ToBackgroundDetachedContext(ctx)
 	sCtx, cancel := context.WithCancel(bg)
 
+	// The advertised base MTU must not exceed the link it is sent over:
+	// every downlink DTLS datagram is base-MTU sized at maximum, so a larger
+	// base than the interface MTU fragments every packet (overlay/tunnel
+	// hosts). 0 = unresolvable (wildcard listen) → keep the configured value.
+	baseMTU := mtuOf(conf)
+	if ifm := ifaceMTUOf(inbound.Source.Address.IP()); ifm != 0 && ifm < baseMTU {
+		errors.LogInfo(ctx, "openconnect: base MTU ", baseMTU, " exceeds listen interface MTU ", ifm, "; using ", ifm)
+		baseMTU = ifm
+	}
+
 	registry := newSessionRegistry(pool)
-	stack := newOCStack(sCtx, d, inbound.Tag, dataMTUOf(conf), registry)
+	stack := newOCStack(sCtx, d, inbound.Tag, dataMTUOf(baseMTU), registry)
 	stack.device.uplinkCounter = uplinkCounter
 	stack.device.downlinkCounter = downlinkCounter
 	// Per-user stats for the L3 relay: same counter names and policy gate as
@@ -125,9 +137,10 @@ func NewServer(ctx context.Context, conf *OpenConnectInboundConfig) (*Server, er
 		users:    users,
 		limiter:  newAuthLimiter(),
 
-		stack:  stack,
-		device: stack.device,
-		pipes:  make(map[string]*ocPipe),
+		stack:   stack,
+		device:  stack.device,
+		pipes:   make(map[string]*ocPipe),
+		baseMTU: baseMTU,
 	}
 	return server, nil
 }
@@ -140,20 +153,47 @@ func mtuOf(conf *OpenConnectInboundConfig) uint32 {
 	return conf.Mtu
 }
 
-// mtu resolves the effective MTU for this server.
+// mtu resolves the effective base MTU: the interface-clamped value set by
+// NewServer, or the configured one when the Server was constructed directly
+// (tests) and never went through the clamp.
 func (s *Server) mtu() uint32 {
+	if s.baseMTU != 0 {
+		return s.baseMTU
+	}
 	return mtuOf(s.conf)
 }
 
 // dataMTUOf returns the DTLS data-plane MTU: the base MTU minus the DTLS
 // tunnel overhead. It is the gVisor NIC MTU, so outgoing IP packets always fit
 // the DTLS tunnel without exceeding the client's receive window.
-func dataMTUOf(conf *OpenConnectInboundConfig) uint32 {
-	m := mtuOf(conf)
-	if m > dtlsOverhead {
-		return m - dtlsOverhead
+func dataMTUOf(base uint32) uint32 {
+	if base > dtlsOverhead {
+		return base - dtlsOverhead
 	}
-	return m
+	return base
+}
+
+// ifaceMTUOf resolves the MTU of the interface holding ip; 0 when unknown.
+func ifaceMTUOf(ip net.IP) uint32 {
+	if ip == nil || ip.IsUnspecified() {
+		return 0
+	}
+	ifaces, err := stdnet.Interfaces()
+	if err != nil {
+		return 0
+	}
+	for i := range ifaces {
+		addrs, err := ifaces[i].Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			if an, ok := a.(*stdnet.IPNet); ok && an.IP.Equal(ip) {
+				return uint32(ifaces[i].MTU)
+			}
+		}
+	}
+	return 0
 }
 
 // Network implements proxy.Inbound. The inbound binds its own sockets, so no
@@ -193,13 +233,13 @@ func (s *Server) Start() error {
 	udpAddr := &net.UDPAddr{IP: s.src.Address.IP(), Port: udpPort}
 	udpLn, err := internet.ListenSystemPacket(s.ctx, udpAddr, nil)
 	if err != nil {
-		tcpLn.Close()
+		_ = tcpLn.Close()
 		return errors.New("failed to listen on UDP ").Base(err).AtError()
 	}
 
 	if err := s.stack.Start(); err != nil {
-		tcpLn.Close()
-		udpLn.Close()
+		_ = tcpLn.Close()
+		_ = udpLn.Close()
 		return errors.New("start gVisor stack ").Base(err).AtError()
 	}
 

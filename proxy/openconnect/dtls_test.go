@@ -1,10 +1,14 @@
 package openconnect
 
 import (
+	"context"
+	"encoding/binary"
 	"net"
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/pion/dtls/v3"
 )
 
 // TestSessionConnWritesToReboundAddr covers the NAT-rebinding write target:
@@ -36,6 +40,57 @@ func TestSessionConnWritesToReboundedAddr(t *testing.T) {
 
 type fakePacketConn struct {
 	addr net.Addr
+}
+
+// legacyVersionConn rewrites every ClientHello the way the OpenSSL
+// openconnect client sends it: both the record version and the ClientHello
+// client_version say DTLS 1.0 (0xFEFF) even though the client negotiates 1.2
+// (fake SSL_SESSION quirk, openssl-dtls.c). GnuTLS clients send 1.2 and work.
+// Every CH must be rewritten: pion re-sends one after HelloVerifyRequest.
+type legacyVersionConn struct {
+	net.PacketConn
+}
+
+func (c *legacyVersionConn) WriteTo(b []byte, a net.Addr) (int, error) {
+	// 13 record header + 12 handshake header → client_version at 25.
+	if len(b) >= 27 && b[0] == 22 && b[13] == 1 {
+		binary.BigEndian.PutUint16(b[3:5], 0xfeff)
+		binary.BigEndian.PutUint16(b[25:27], 0xfeff)
+	}
+	return c.PacketConn.WriteTo(b, a)
+}
+
+// TestDTLSLegacyVersionClientRejected documents the pion/dtls behavior that
+// makes OpenSSL-built openconnect clients fall back to CSTP against us:
+// a DTLS 1.0 client_version in the ClientHello is rejected with a fatal
+// ProtocolVersion alert (flight0handler/flight2handler require exactly 1.2),
+// while ocserv/GnuTLS tolerates it and answers 1.2. When the pion fork makes
+// us tolerant, this test flips to expecting success.
+func TestDTLSLegacyVersionClientRejected(t *testing.T) {
+	s := newTestServer(t)
+	_, _, sess := ocConnectAs(t, s, "testuser", "testpass")
+	udpAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(s.conf.DtlsPort)}
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer func() { _ = pc.Close() }()
+	dc, err := dtls.ClientWithOptions(&legacyVersionConn{PacketConn: pc}, udpAddr,
+		dtls.WithPSK(func(_ []byte) ([]byte, error) { return sess.getPSK(), nil }),
+		dtls.WithPSKIdentityHint([]byte("psk")),
+		dtls.WithCipherSuites(dtls.TLS_PSK_WITH_CHACHA20_POLY1305_SHA256),
+	)
+	if err != nil {
+		t.Fatalf("dtls client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err = dc.HandshakeContext(ctx)
+	_ = dc.Close()
+	t.Logf("handshake with DTLS 1.0 client_version: %v", err)
+	if err == nil {
+		t.Fatal("expected pion to reject the legacy-version ClientHello (flip this test when the fork lands)")
+	}
 }
 
 func (f *fakePacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {

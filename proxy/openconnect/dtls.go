@@ -136,6 +136,12 @@ func (s *Server) routeUDPPacket(data []byte, ua *net.UDPAddr) {
 	if isDTLSClientHello(data) {
 		sess := s.resolveSession(ua, data)
 		if sess == nil {
+			// The only silent dead end on the DTLS path: a ClientHello we
+			// cannot map to a session (stale App-ID and unknown source IP).
+			// Logged, not dropped quietly — this was undiagnosable in the
+			// 2026-09-27 CSTP-fallback investigation on the gate.
+			appID, _ := extractAppID(data)
+			errors.LogWarning(s.ctx, "openconnect: ClientHello from ", ua, " matches no session (appID=", appID, "), dropping")
 			return
 		}
 		pipe := newOCPipe(ua)
@@ -191,16 +197,27 @@ func (s *Server) resolveSession(ua *net.UDPAddr, data []byte) *ocSession {
 // client source address captured at demux time; pipe.addr may be re-keyed by a
 // concurrent NAT-rebinding, so it must not be read here.
 func (s *Server) startDTLSSession(sess *ocSession, pipe *ocPipe, addr *net.UDPAddr) {
+	// pion picks the suite following the client's preference order, so the
+	// only way to steer it is to restrict the offer. Both suites by default;
+	// "aes128gcm"/"chacha20poly1305" pin one (AES-GCM wins by a wide margin
+	// on AES-NI hosts).
+	suites := []dtls.CipherSuiteID{
+		dtls.TLS_PSK_WITH_AES_128_GCM_SHA256,
+		dtls.TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
+	}
+	switch s.conf.Cipher {
+	case "aes128gcm":
+		suites = suites[:1]
+	case "chacha20poly1305":
+		suites = suites[1:]
+	}
 	sc := &sessionConn{pipe: pipe, ln: s.udpLn}
 	dc, err := dtls.ServerWithOptions(sc, addr,
 		dtls.WithPSK(func(_ []byte) ([]byte, error) {
 			return sess.getPSK(), nil
 		}),
 		dtls.WithPSKIdentityHint([]byte(pskNegotiate)),
-		dtls.WithCipherSuites(
-			dtls.TLS_PSK_WITH_AES_128_GCM_SHA256,
-			dtls.TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
-		),
+		dtls.WithCipherSuites(suites...),
 	)
 	if err != nil {
 		s.dropPipe(sess, pipe)
@@ -210,7 +227,7 @@ func (s *Server) startDTLSSession(sess *ocSession, pipe *ocPipe, addr *net.UDPAd
 	err = dc.HandshakeContext(hsCtx)
 	cancel()
 	if err != nil {
-		dc.Close()
+		_ = dc.Close()
 		s.dropPipe(sess, pipe)
 		errors.LogInfo(s.ctx, "openconnect: DTLS handshake failed for ", sess.ip, ": ", err)
 		return
@@ -245,7 +262,7 @@ func (s *Server) dtlsReadPump(sess *ocSession, dc *dtls.Conn) {
 			return
 		default:
 		}
-		dc.SetReadDeadline(time.Now().Add(dpd))
+		_ = dc.SetReadDeadline(time.Now().Add(dpd))
 		n, err := dc.Read(buf)
 		if err != nil {
 			if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
@@ -253,7 +270,7 @@ func (s *Server) dtlsReadPump(sess *ocSession, dc *dtls.Conn) {
 					errors.LogInfo(s.ctx, "openconnect: DPD timeout for ", sess.ip)
 					return
 				}
-				dc.Write([]byte{acPKTDPDOut, 0})
+				_, _ = dc.Write([]byte{acPKTDPDOut, 0})
 				continue
 			}
 			return
@@ -285,7 +302,7 @@ func (s *Server) dtlsReadPump(sess *ocSession, dc *dtls.Conn) {
 			resp := make([]byte, n)
 			copy(resp, buf[:n])
 			resp[0] = acPKTDPDResp
-			dc.Write(resp)
+			_, _ = dc.Write(resp)
 		case acPKTDPDResp, acPKTKeepalive:
 			// liveness only; activity already recorded above
 		case acPKTDisconnect, acPKTTerm:
@@ -320,7 +337,7 @@ func (s *Server) teardownDTLS(sess *ocSession, pipe *ocPipe, dc *dtls.Conn) {
 	}
 	sess.mu.Unlock()
 
-	dc.Close()
+	_ = dc.Close()
 	s.dropPipe(sess, pipe)
 }
 

@@ -3,6 +3,8 @@ package openconnect
 import (
 	"bufio"
 	"bytes"
+	"encoding/xml"
+	"io"
 	"strings"
 	"testing"
 )
@@ -21,6 +23,30 @@ func TestParseFormXML(t *testing.T) {
 	body2 := []byte(`<config-auth><auth><password>a&amp;b&lt;c&gt;</password></auth></config-auth>`)
 	if got := parseForm(body2)["password"]; got != "a&b<c>" {
 		t.Errorf("unescaped password = %q, want %q", got, "a&b<c>")
+	}
+}
+
+// TestFormsWellFormed guards the auth forms' XML: clients parse them with
+// real XML parsers, and the old password form closed a <config-auth> it
+// never opened.
+func TestFormsWellFormed(t *testing.T) {
+	for name, doc := range map[string]string{
+		"login":   loginForm,
+		"passwd":  passwdForm,
+		"success": successMsg,
+		"fail":    failMsg,
+	} {
+		dec := xml.NewDecoder(strings.NewReader(doc))
+		for {
+			_, err := dec.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Errorf("%s form: not well-formed XML: %v", name, err)
+				break
+			}
+		}
 	}
 }
 
