@@ -24,3 +24,14 @@ func TestDialWithLocalAddr(t *testing.T) {
 	}
 	conn.Close()
 }
+
+func TestDialFailsWhenEgressInterfaceMissing(t *testing.T) {
+	// Regression: a missing egress interface must fail the dial instead of
+	// silently falling back to the host's default route. The old soft-fail
+	// hid AWG tunnel death from observatory (probes "succeeded" via the
+	// host's own egress) and leaked VPN traffic to the host IP.
+	_, err := DialSystem(context.Background(), net.TCPDestination(net.IPAddress([]byte{1, 1, 1, 1}), 443), &SocketConfig{Interface: "no-such-iface-xray"})
+	if err == nil {
+		t.Fatal("want dial error when the egress interface is missing, got nil")
+	}
+}

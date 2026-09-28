@@ -18,6 +18,29 @@ var (
 	effectiveSystemDialer SystemDialer = &DefaultSystemDialer{}
 )
 
+// applyOutboundSockOpts applies outbound socket options to a raw connection.
+//
+// A failure is FATAL: a socket that cannot get its configured options (e.g.
+// the egress interface no longer exists) must not silently fall back to the
+// host's default route, because that changes the connection's egress
+// identity (VPN traffic would leak to the host IP and health probes would
+// report a dead tunnel as alive).
+func applyOutboundSockOpts(c syscall.RawConn, sockopt *SocketConfig, apply func(fd uintptr) error) error {
+	if sockopt == nil {
+		return nil
+	}
+	var applyErr error
+	if err := c.Control(func(fd uintptr) {
+		applyErr = apply(fd)
+	}); err != nil {
+		return err
+	}
+	if applyErr != nil {
+		return errors.New("failed to apply socket options").Base(applyErr)
+	}
+	return nil
+}
+
 type SystemDialer interface {
 	Dial(ctx context.Context, source net.Address, destination net.Destination, sockopt *SocketConfig) (net.Conn, error)
 	DestIpAddress() net.IP
@@ -74,12 +97,8 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
 					errors.LogInfoInner(ctx, err, "failed to apply external controller")
 				}
 			}
-			return c.Control(func(fd uintptr) {
-				if sockopt != nil {
-					if err := applyOutboundSocketOptions(network, destAddr.String(), fd, sockopt); err != nil {
-						errors.LogInfo(ctx, err, "failed to apply socket options")
-					}
-				}
+			return applyOutboundSockOpts(c, sockopt, func(fd uintptr) error {
+				return applyOutboundSocketOptions(network, destAddr.String(), fd, sockopt)
 			})
 		}
 		packetConn, err := lc.ListenPacket(ctx, srcAddr.Network(), srcAddr.String())
@@ -131,12 +150,8 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
 					errors.LogInfoInner(ctx, err, "failed to apply external controller")
 				}
 			}
-			return c.Control(func(fd uintptr) {
-				if sockopt != nil {
-					if err := applyOutboundSocketOptions(network, address, fd, sockopt); err != nil {
-						errors.LogInfoInner(ctx, err, "failed to apply socket options")
-					}
-				}
+			return applyOutboundSockOpts(c, sockopt, func(fd uintptr) error {
+				return applyOutboundSocketOptions(network, address, fd, sockopt)
 			})
 		}
 	}
