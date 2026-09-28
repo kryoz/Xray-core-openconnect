@@ -94,6 +94,12 @@ message StrategyLeastLoadConfig {
   float tolerance = 6;
 }
 
+message StrategyFailoverConfig {
+  // Number of consecutive failed probes required to mark an outbound as
+  // down and fail over to the next one. Default 2.
+  int32 fail_threshold = 1;
+}
+
 message Config {
   enum DomainStrategy {
     // Use domain as is.

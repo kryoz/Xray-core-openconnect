@@ -218,9 +218,11 @@ func (o *Observer) updateStatusForResult(outbound string, result *ProbeResult) {
 		status.Delay = result.Delay
 		status.LastSeenTime = status.LastTryTime
 		status.LastErrorReason = ""
+		status.FailStreak = 0
 	} else {
 		status.LastErrorReason = result.LastErrorReason
 		status.Delay = 99999999
+		status.FailStreak++
 	}
 }
 
