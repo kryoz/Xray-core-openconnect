@@ -19,7 +19,7 @@ const (
 	IPV6_UNICAST_IF = 31
 )
 
-func setTFO(fd syscall.Handle, tfo int) error {
+func setTFO(ctx context.Context, fd syscall.Handle, tfo int) error {
 	if tfo > 0 {
 		tfo = 1
 	}
@@ -27,13 +27,13 @@ func setTFO(fd syscall.Handle, tfo int) error {
 		if err := syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, TCP_FASTOPEN, tfo); err != nil {
 			// TFO is best-effort: unsupported platforms must degrade to
 			// plain TCP, not fail the dial (inbound already ignored this).
-			errors.LogInfo(context.Background(), "TCP_FASTOPEN not supported, continuing without TFO: ", err)
+			errors.LogInfo(ctx, "TCP_FASTOPEN not supported, continuing without TFO: ", err)
 		}
 	}
 	return nil
 }
 
-func applyOutboundSocketOptions(network string, address string, fd uintptr, config *SocketConfig) error {
+func applyOutboundSocketOptions(ctx context.Context, network string, address string, fd uintptr, config *SocketConfig) error {
 	if config.Interface != "" {
 		inf, err := net.InterfaceByName(config.Interface)
 		if err != nil {
@@ -69,7 +69,7 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 	}
 
 	if isTCPSocket(network) {
-		if err := setTFO(syscall.Handle(fd), config.ParseTFOValue()); err != nil {
+		if err := setTFO(ctx, syscall.Handle(fd), config.ParseTFOValue()); err != nil {
 			return err
 		}
 		if config.TcpKeepAliveIdle > 0 {
@@ -124,7 +124,7 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 
 func applyInboundSocketOptions(network string, fd uintptr, config *SocketConfig) error {
 	if isTCPSocket(network) {
-		if err := setTFO(syscall.Handle(fd), config.ParseTFOValue()); err != nil {
+		if err := setTFO(context.Background(), syscall.Handle(fd), config.ParseTFOValue()); err != nil {
 			return err
 		}
 		if config.TcpKeepAliveIdle > 0 {

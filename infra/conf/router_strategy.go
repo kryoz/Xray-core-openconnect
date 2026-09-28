@@ -47,7 +47,10 @@ type strategyLeastLoadConfig struct {
 
 type strategyFailoverConfig struct {
 	// FailThreshold is the number of consecutive failed probes required to
-	// fail over from an outbound. Default 2.
+	// fail over from an outbound. Default 2. Outbounds must be covered by
+	// the observatory's subjectSelector; unobserved outbounds are always
+	// considered up. Set the balancing rule's fallbackTag for the all-down
+	// case, otherwise the default outbound handler is used.
 	FailThreshold int `json:"failThreshold,omitempty"`
 }
 

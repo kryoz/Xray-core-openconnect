@@ -98,7 +98,7 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
 				}
 			}
 			return applyOutboundSockOpts(c, sockopt, func(fd uintptr) error {
-				return applyOutboundSocketOptions(network, destAddr.String(), fd, sockopt)
+				return applyOutboundSocketOptions(ctx, network, destAddr.String(), fd, sockopt)
 			})
 		}
 		packetConn, err := lc.ListenPacket(ctx, srcAddr.Network(), srcAddr.String())
@@ -151,7 +151,7 @@ func (d *DefaultSystemDialer) Dial(ctx context.Context, src net.Address, dest ne
 				}
 			}
 			return applyOutboundSockOpts(c, sockopt, func(fd uintptr) error {
-				return applyOutboundSocketOptions(network, address, fd, sockopt)
+				return applyOutboundSocketOptions(ctx, network, address, fd, sockopt)
 			})
 		}
 	}
