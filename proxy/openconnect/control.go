@@ -383,10 +383,19 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 				sess.dtlsConn = nil
 				sess.dtlsWriter = s.device.register(sess.ip, deviceWriter)
 				sess.mu.Unlock()
+				// Capture the dead generation's pipe before closing: a newer
+				// generation may register its own pipe in the meantime
+				// (sess.pipe is guarded by dmuMu, not sess.mu), and dropping
+				// by pointer cannot kill it.
+				s.dmuMu.Lock()
+				stalePipe := sess.pipe
+				s.dmuMu.Unlock()
 				_ = stale.Close()
 				// Drop the dead DTLS pipe or it stays in s.pipes and swallows
 				// the client's next DTLS ClientHello (C3).
-				s.dropSessionPipe(sess)
+				if stalePipe != nil {
+					s.dropPipe(sess, stalePipe)
+				}
 				errors.LogInfo(s.ctx, "openconnect: CSTP data with live DTLS for ", sess.ip, ", falling back to CSTP writer")
 			} else {
 				sess.mu.Unlock()

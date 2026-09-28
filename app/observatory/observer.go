@@ -38,8 +38,17 @@ type Observer struct {
 	dispatcher routing.Dispatcher
 }
 
+// GetObservation returns a snapshot of the current status. The copy is taken
+// under statusLock, so callers may read the returned statuses concurrently
+// with the probe loop mutating them.
 func (o *Observer) GetObservation(ctx context.Context) (proto.Message, error) {
-	return &ObservationResult{Status: o.status}, nil
+	o.statusLock.Lock()
+	defer o.statusLock.Unlock()
+	status := make([]*OutboundStatus, len(o.status))
+	for i, s := range o.status {
+		status[i] = proto.Clone(s).(*OutboundStatus)
+	}
+	return &ObservationResult{Status: status}, nil
 }
 
 func (o *Observer) Type() interface{} {

@@ -44,8 +44,7 @@ func (s *FailoverStrategy) InjectContext(ctx context.Context) {
 		return nil
 	}); err != nil {
 		errors.LogWarning(ctx, "failover strategy: cannot acquire observatory feature: ", err)
-	}
-	if s.observatory == nil {
+	} else if s.observatory == nil {
 		errors.LogWarning(ctx, "failover strategy: observatory is not available, failover is disabled (always using the first selector)")
 	}
 }
@@ -55,6 +54,10 @@ func (s *FailoverStrategy) GetPrincipleTarget(candidates []string) []string {
 	return orderCandidates(candidates, s.selectors)
 }
 
+// PickOutbound returns the first up candidate in selector order, or ""
+// when all candidates are down. An empty tag routes to the balancing
+// rule's fallbackTag; without one the dispatcher falls back to the
+// default outbound handler, so configure fallbackTag for the all-down case.
 func (s *FailoverStrategy) PickOutbound(candidates []string) string {
 	status := s.currentStatus()
 	for _, tag := range orderCandidates(candidates, s.selectors) {

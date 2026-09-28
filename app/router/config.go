@@ -161,7 +161,11 @@ func (br *BalancingRule) Build(ohm outbound.Manager, dispatcher routing.Dispatch
 			if err != nil {
 				return nil, err
 			}
-			s, _ = i.(*StrategyFailoverConfig)
+			var ok bool
+			s, ok = i.(*StrategyFailoverConfig)
+			if !ok {
+				return nil, errors.New("not a StrategyFailoverConfig").AtError()
+			}
 		}
 		return &Balancer{
 			selectors:   br.OutboundSelector,

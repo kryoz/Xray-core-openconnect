@@ -7,6 +7,7 @@ import (
 
 	"github.com/xtls/xray-core/app/observatory"
 	"github.com/xtls/xray-core/features/extension"
+	"github.com/xtls/xray-core/features/outbound"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -167,4 +168,46 @@ func TestFailoverConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+type fakeOutboundManager struct{}
+
+func (fakeOutboundManager) Type() interface{}                                  { return outbound.ManagerType() }
+func (fakeOutboundManager) Start() error                                       { return nil }
+func (fakeOutboundManager) Close() error                                       { return nil }
+func (fakeOutboundManager) GetHandler(string) outbound.Handler                 { return nil }
+func (fakeOutboundManager) GetDefaultHandler() outbound.Handler                { return nil }
+func (fakeOutboundManager) AddHandler(context.Context, outbound.Handler) error { return nil }
+func (fakeOutboundManager) RemoveHandler(context.Context, string) error        { return nil }
+func (fakeOutboundManager) ListHandlers(context.Context) []outbound.Handler    { return nil }
+func (fakeOutboundManager) Select([]string) []string                           { return []string{"backup", "primary"} }
+
+// TestFailoverAllDownAtBalancerLevel pins the Balancer contract: all-down
+// returns fallbackTag when set, and an error otherwise (the dispatcher then
+// falls back to the default outbound handler).
+func TestFailoverAllDownAtBalancerLevel(t *testing.T) {
+	fake := &fakeObservatory{}
+	s := NewFailoverStrategy([]string{"primary", "backup"}, nil)
+	s.observatory = fake
+	fake.set("primary", false, 2)
+	fake.set("backup", false, 2)
+
+	b := &Balancer{
+		selectors:   []string{"primary", "backup"},
+		ohm:         fakeOutboundManager{},
+		fallbackTag: "fallback",
+		strategy:    s,
+	}
+	tag, err := b.PickOutbound()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag != "fallback" {
+		t.Fatalf("want fallbackTag when all down, got %q", tag)
+	}
+
+	b.fallbackTag = ""
+	if _, err := b.PickOutbound(); err == nil {
+		t.Fatal("want error when all down and no fallbackTag")
+	}
 }

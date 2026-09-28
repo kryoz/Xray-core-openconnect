@@ -125,7 +125,7 @@ func OriginalDst(la, ra net.Addr) (net.IP, int, error) {
 	return odIP, odPort, nil
 }
 
-func applyOutboundSocketOptions(network string, address string, fd uintptr, config *SocketConfig) error {
+func applyOutboundSocketOptions(ctx context.Context, network string, address string, fd uintptr, config *SocketConfig) error {
 	if config.Mark != 0 {
 		if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_USER_COOKIE, int(config.Mark)); err != nil {
 			return errors.New("failed to set SO_USER_COOKIE").Base(err)
@@ -141,7 +141,7 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 			if err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, unix.TCP_FASTOPEN, tfo); err != nil {
 				// Connect-TFO is best-effort: a kernel without it must
 				// degrade to plain TCP, not fail the dial.
-				errors.LogInfo(context.Background(), "TCP_FASTOPEN not supported, continuing without TFO: ", err)
+				errors.LogInfo(ctx, "TCP_FASTOPEN not supported, continuing without TFO: ", err)
 			}
 		}
 		if config.TcpKeepAliveIdle > 0 || config.TcpKeepAliveInterval > 0 {

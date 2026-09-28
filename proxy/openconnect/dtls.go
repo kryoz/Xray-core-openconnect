@@ -373,16 +373,6 @@ func (s *Server) dropPipe(sess *ocSession, pipe *ocPipe) {
 	}
 }
 
-// dropSessionPipe drops whatever pipe is currently registered for sess.
-func (s *Server) dropSessionPipe(sess *ocSession) {
-	s.dmuMu.Lock()
-	pipe := sess.pipe
-	s.dmuMu.Unlock()
-	if pipe != nil {
-		s.dropPipe(sess, pipe)
-	}
-}
-
 // extractAppID pulls the App-ID from a DTLS ClientHello: extension 48018
 // (data = 1-byte length + ID) or, as fallback, the session_id field.
 func extractAppID(pkt []byte) (string, bool) {
