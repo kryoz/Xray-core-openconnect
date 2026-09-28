@@ -73,7 +73,7 @@ func (x Config_DomainStrategy) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Config_DomainStrategy.Descriptor instead.
 func (Config_DomainStrategy) EnumDescriptor() ([]byte, []int) {
-	return file_app_router_config_proto_rawDescGZIP(), []int{5, 0}
+	return file_app_router_config_proto_rawDescGZIP(), []int{6, 0}
 }
 
 type RoutingRule struct {
@@ -582,6 +582,52 @@ func (x *StrategyLeastLoadConfig) GetTolerance() float32 {
 	return 0
 }
 
+type StrategyFailoverConfig struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Number of consecutive failed probes required to mark an outbound as
+	// down and fail over to the next one. Default 2.
+	FailThreshold int32 `protobuf:"varint,1,opt,name=fail_threshold,json=failThreshold,proto3" json:"fail_threshold,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StrategyFailoverConfig) Reset() {
+	*x = StrategyFailoverConfig{}
+	mi := &file_app_router_config_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StrategyFailoverConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StrategyFailoverConfig) ProtoMessage() {}
+
+func (x *StrategyFailoverConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_app_router_config_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StrategyFailoverConfig.ProtoReflect.Descriptor instead.
+func (*StrategyFailoverConfig) Descriptor() ([]byte, []int) {
+	return file_app_router_config_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *StrategyFailoverConfig) GetFailThreshold() int32 {
+	if x != nil {
+		return x.FailThreshold
+	}
+	return 0
+}
+
 type Config struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	DomainStrategy Config_DomainStrategy  `protobuf:"varint,1,opt,name=domain_strategy,json=domainStrategy,proto3,enum=xray.app.router.Config_DomainStrategy" json:"domain_strategy,omitempty"`
@@ -593,7 +639,7 @@ type Config struct {
 
 func (x *Config) Reset() {
 	*x = Config{}
-	mi := &file_app_router_config_proto_msgTypes[5]
+	mi := &file_app_router_config_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -605,7 +651,7 @@ func (x *Config) String() string {
 func (*Config) ProtoMessage() {}
 
 func (x *Config) ProtoReflect() protoreflect.Message {
-	mi := &file_app_router_config_proto_msgTypes[5]
+	mi := &file_app_router_config_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -618,7 +664,7 @@ func (x *Config) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Config.ProtoReflect.Descriptor instead.
 func (*Config) Descriptor() ([]byte, []int) {
-	return file_app_router_config_proto_rawDescGZIP(), []int{5}
+	return file_app_router_config_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Config) GetDomainStrategy() Config_DomainStrategy {
@@ -699,7 +745,9 @@ const file_app_router_config_proto_rawDesc = "" +
 	"\tbaselines\x18\x03 \x03(\x03R\tbaselines\x12\x1a\n" +
 	"\bexpected\x18\x04 \x01(\x05R\bexpected\x12\x16\n" +
 	"\x06maxRTT\x18\x05 \x01(\x03R\x06maxRTT\x12\x1c\n" +
-	"\ttolerance\x18\x06 \x01(\x02R\ttolerance\"\x96\x02\n" +
+	"\ttolerance\x18\x06 \x01(\x02R\ttolerance\"?\n" +
+	"\x16StrategyFailoverConfig\x12%\n" +
+	"\x0efail_threshold\x18\x01 \x01(\x05R\rfailThreshold\"\x96\x02\n" +
 	"\x06Config\x12O\n" +
 	"\x0fdomain_strategy\x18\x01 \x01(\x0e2&.xray.app.router.Config.DomainStrategyR\x0edomainStrategy\x120\n" +
 	"\x04rule\x18\x02 \x03(\v2\x1c.xray.app.router.RoutingRuleR\x04rule\x12E\n" +
@@ -724,7 +772,7 @@ func file_app_router_config_proto_rawDescGZIP() []byte {
 }
 
 var file_app_router_config_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_app_router_config_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_app_router_config_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_app_router_config_proto_goTypes = []any{
 	(Config_DomainStrategy)(0),      // 0: xray.app.router.Config.DomainStrategy
 	(*RoutingRule)(nil),             // 1: xray.app.router.RoutingRule
@@ -732,29 +780,30 @@ var file_app_router_config_proto_goTypes = []any{
 	(*BalancingRule)(nil),           // 3: xray.app.router.BalancingRule
 	(*StrategyWeight)(nil),          // 4: xray.app.router.StrategyWeight
 	(*StrategyLeastLoadConfig)(nil), // 5: xray.app.router.StrategyLeastLoadConfig
-	(*Config)(nil),                  // 6: xray.app.router.Config
-	nil,                             // 7: xray.app.router.RoutingRule.AttributesEntry
-	nil,                             // 8: xray.app.router.WebhookConfig.HeadersEntry
-	(*geodata.DomainRule)(nil),      // 9: xray.common.geodata.DomainRule
-	(*geodata.IPRule)(nil),          // 10: xray.common.geodata.IPRule
-	(*net.PortList)(nil),            // 11: xray.common.net.PortList
-	(net.Network)(0),                // 12: xray.common.net.Network
-	(*serial.TypedMessage)(nil),     // 13: xray.common.serial.TypedMessage
+	(*StrategyFailoverConfig)(nil),  // 6: xray.app.router.StrategyFailoverConfig
+	(*Config)(nil),                  // 7: xray.app.router.Config
+	nil,                             // 8: xray.app.router.RoutingRule.AttributesEntry
+	nil,                             // 9: xray.app.router.WebhookConfig.HeadersEntry
+	(*geodata.DomainRule)(nil),      // 10: xray.common.geodata.DomainRule
+	(*geodata.IPRule)(nil),          // 11: xray.common.geodata.IPRule
+	(*net.PortList)(nil),            // 12: xray.common.net.PortList
+	(net.Network)(0),                // 13: xray.common.net.Network
+	(*serial.TypedMessage)(nil),     // 14: xray.common.serial.TypedMessage
 }
 var file_app_router_config_proto_depIdxs = []int32{
-	9,  // 0: xray.app.router.RoutingRule.domain:type_name -> xray.common.geodata.DomainRule
-	10, // 1: xray.app.router.RoutingRule.ip:type_name -> xray.common.geodata.IPRule
-	11, // 2: xray.app.router.RoutingRule.port_list:type_name -> xray.common.net.PortList
-	12, // 3: xray.app.router.RoutingRule.networks:type_name -> xray.common.net.Network
-	10, // 4: xray.app.router.RoutingRule.source_ip:type_name -> xray.common.geodata.IPRule
-	11, // 5: xray.app.router.RoutingRule.source_port_list:type_name -> xray.common.net.PortList
-	7,  // 6: xray.app.router.RoutingRule.attributes:type_name -> xray.app.router.RoutingRule.AttributesEntry
-	10, // 7: xray.app.router.RoutingRule.local_ip:type_name -> xray.common.geodata.IPRule
-	11, // 8: xray.app.router.RoutingRule.local_port_list:type_name -> xray.common.net.PortList
-	11, // 9: xray.app.router.RoutingRule.vless_route_list:type_name -> xray.common.net.PortList
+	10, // 0: xray.app.router.RoutingRule.domain:type_name -> xray.common.geodata.DomainRule
+	11, // 1: xray.app.router.RoutingRule.ip:type_name -> xray.common.geodata.IPRule
+	12, // 2: xray.app.router.RoutingRule.port_list:type_name -> xray.common.net.PortList
+	13, // 3: xray.app.router.RoutingRule.networks:type_name -> xray.common.net.Network
+	11, // 4: xray.app.router.RoutingRule.source_ip:type_name -> xray.common.geodata.IPRule
+	12, // 5: xray.app.router.RoutingRule.source_port_list:type_name -> xray.common.net.PortList
+	8,  // 6: xray.app.router.RoutingRule.attributes:type_name -> xray.app.router.RoutingRule.AttributesEntry
+	11, // 7: xray.app.router.RoutingRule.local_ip:type_name -> xray.common.geodata.IPRule
+	12, // 8: xray.app.router.RoutingRule.local_port_list:type_name -> xray.common.net.PortList
+	12, // 9: xray.app.router.RoutingRule.vless_route_list:type_name -> xray.common.net.PortList
 	2,  // 10: xray.app.router.RoutingRule.webhook:type_name -> xray.app.router.WebhookConfig
-	8,  // 11: xray.app.router.WebhookConfig.headers:type_name -> xray.app.router.WebhookConfig.HeadersEntry
-	13, // 12: xray.app.router.BalancingRule.strategy_settings:type_name -> xray.common.serial.TypedMessage
+	9,  // 11: xray.app.router.WebhookConfig.headers:type_name -> xray.app.router.WebhookConfig.HeadersEntry
+	14, // 12: xray.app.router.BalancingRule.strategy_settings:type_name -> xray.common.serial.TypedMessage
 	4,  // 13: xray.app.router.StrategyLeastLoadConfig.costs:type_name -> xray.app.router.StrategyWeight
 	0,  // 14: xray.app.router.Config.domain_strategy:type_name -> xray.app.router.Config.DomainStrategy
 	1,  // 15: xray.app.router.Config.rule:type_name -> xray.app.router.RoutingRule
@@ -781,7 +830,7 @@ func file_app_router_config_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_app_router_config_proto_rawDesc), len(file_app_router_config_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

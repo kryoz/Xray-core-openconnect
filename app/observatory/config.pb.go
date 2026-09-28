@@ -169,8 +169,10 @@ type OutboundStatus struct {
 	LastSeenTime int64 `protobuf:"varint,5,opt,name=last_seen_time,json=lastSeenTime,proto3" json:"last_seen_time,omitempty"`
 	// @Document The time this outbound is tried
 	//@Type id.outboundTag
-	LastTryTime   int64                        `protobuf:"varint,6,opt,name=last_try_time,json=lastTryTime,proto3" json:"last_try_time,omitempty"`
-	HealthPing    *HealthPingMeasurementResult `protobuf:"bytes,7,opt,name=health_ping,json=healthPing,proto3" json:"health_ping,omitempty"`
+	LastTryTime int64                        `protobuf:"varint,6,opt,name=last_try_time,json=lastTryTime,proto3" json:"last_try_time,omitempty"`
+	HealthPing  *HealthPingMeasurementResult `protobuf:"bytes,7,opt,name=health_ping,json=healthPing,proto3" json:"health_ping,omitempty"`
+	// @Document The number of consecutive failed probes
+	FailStreak    int64 `protobuf:"varint,8,opt,name=fail_streak,json=failStreak,proto3" json:"fail_streak,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -252,6 +254,13 @@ func (x *OutboundStatus) GetHealthPing() *HealthPingMeasurementResult {
 		return x.HealthPing
 	}
 	return nil
+}
+
+func (x *OutboundStatus) GetFailStreak() int64 {
+	if x != nil {
+		return x.FailStreak
+	}
+	return 0
 }
 
 type ProbeResult struct {
@@ -449,7 +458,7 @@ const file_app_observatory_config_proto_rawDesc = "" +
 	"\tdeviation\x18\x03 \x01(\x03R\tdeviation\x12\x18\n" +
 	"\aaverage\x18\x04 \x01(\x03R\aaverage\x12\x10\n" +
 	"\x03max\x18\x05 \x01(\x03R\x03max\x12\x10\n" +
-	"\x03min\x18\x06 \x01(\x03R\x03min\"\xae\x02\n" +
+	"\x03min\x18\x06 \x01(\x03R\x03min\"\xcf\x02\n" +
 	"\x0eOutboundStatus\x12\x14\n" +
 	"\x05alive\x18\x01 \x01(\bR\x05alive\x12\x14\n" +
 	"\x05delay\x18\x02 \x01(\x03R\x05delay\x12*\n" +
@@ -458,7 +467,9 @@ const file_app_observatory_config_proto_rawDesc = "" +
 	"\x0elast_seen_time\x18\x05 \x01(\x03R\flastSeenTime\x12\"\n" +
 	"\rlast_try_time\x18\x06 \x01(\x03R\vlastTryTime\x12W\n" +
 	"\vhealth_ping\x18\a \x01(\v26.xray.core.app.observatory.HealthPingMeasurementResultR\n" +
-	"healthPing\"e\n" +
+	"healthPing\x12\x1f\n" +
+	"\vfail_streak\x18\b \x01(\x03R\n" +
+	"failStreak\"e\n" +
 	"\vProbeResult\x12\x14\n" +
 	"\x05alive\x18\x01 \x01(\bR\x05alive\x12\x14\n" +
 	"\x05delay\x18\x02 \x01(\x03R\x05delay\x12*\n" +
