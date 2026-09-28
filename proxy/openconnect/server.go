@@ -6,6 +6,7 @@ import (
 	stdnet "net"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
@@ -110,7 +111,15 @@ func NewServer(ctx context.Context, conf *OpenConnectInboundConfig) (*Server, er
 	}
 
 	registry := newSessionRegistry(pool)
-	stack := newOCStack(sCtx, d, inbound.Tag, dataMTUOf(baseMTU), registry)
+	dpd := conf.Dpd
+	if dpd == 0 {
+		dpd = DefaultDPD
+	}
+	// Inner TCP flows share the tunnel's dead-peer window: once DPD would
+	// drop the tunnel (2×dpd), also abort a dead peer's retransmission so a
+	// killed client cannot leak endpoints/timers that burn CPU afterwards.
+	flowTimeout := 2 * time.Duration(dpd) * time.Second
+	stack := newOCStack(sCtx, d, inbound.Tag, dataMTUOf(baseMTU), registry, flowTimeout)
 	stack.device.uplinkCounter = uplinkCounter
 	stack.device.downlinkCounter = downlinkCounter
 	// Per-user stats for the L3 relay: same counter names and policy gate as

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -445,16 +446,20 @@ type ocStack struct {
 	device   *ocDevice
 	stack    *stack.Stack
 	endpoint *ocLinkEndpoint
+	// flowTimeout bounds the unacknowledged-data window of each inner TCP
+	// flow. See the TCP_USER_TIMEOUT note in Start.
+	flowTimeout time.Duration
 }
 
-func newOCStack(ctx context.Context, dispatcher routing.Dispatcher, tag string, mtu uint32, registry *sessionRegistry) *ocStack {
+func newOCStack(ctx context.Context, dispatcher routing.Dispatcher, tag string, mtu uint32, registry *sessionRegistry, flowTimeout time.Duration) *ocStack {
 	device := newOCDevice(mtu)
 	device.registry = registry // enables the L3 client↔client relay
 	return &ocStack{
-		ctx:      ctx,
-		handler:  &ocHandler{ctx: ctx, dispatcher: dispatcher, tag: tag, registry: registry},
-		device:   device,
-		endpoint: &ocLinkEndpoint{device: device},
+		ctx:         ctx,
+		handler:     &ocHandler{ctx: ctx, dispatcher: dispatcher, tag: tag, registry: registry},
+		device:      device,
+		endpoint:    &ocLinkEndpoint{device: device},
+		flowTimeout: flowTimeout,
 	}
 }
 
@@ -473,6 +478,16 @@ func (s *ocStack) Start() error {
 			if err != nil {
 				r.Complete(true)
 				return
+			}
+			// Bound the inner TCP flow's unacknowledged-data window. Without
+			// TCP_USER_TIMEOUT gVisor retransmits a dead peer's unacked
+			// segments forever (RTO capped at maxRTO), so a load-test client
+			// killed without FIN/RST leaks the endpoint and its retransmit
+			// timer, burning CPU after the tunnel is torn down. Aborting
+			// closes the flow and cleans the endpoint up.
+			if s.flowTimeout > 0 {
+				uto := tcpip.TCPUserTimeoutOption(s.flowTimeout)
+				_ = ep.SetSockOpt(&uto)
 			}
 			s.handler.HandleConnection(
 				gonet.NewTCPConn(&wq, ep),
