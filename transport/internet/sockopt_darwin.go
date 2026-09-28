@@ -108,7 +108,9 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 		}
 		if tfo >= 0 {
 			if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_FASTOPEN, tfo); err != nil {
-				return err
+				// Connect-TFO is best-effort: a kernel without it must
+				// degrade to plain TCP, not fail the dial.
+				errors.LogInfo(context.Background(), "TCP_FASTOPEN not supported, continuing without TFO: ", err)
 			}
 		}
 

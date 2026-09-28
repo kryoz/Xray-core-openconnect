@@ -25,7 +25,9 @@ func setTFO(fd syscall.Handle, tfo int) error {
 	}
 	if tfo >= 0 {
 		if err := syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, TCP_FASTOPEN, tfo); err != nil {
-			return err
+			// TFO is best-effort: unsupported platforms must degrade to
+			// plain TCP, not fail the dial (inbound already ignored this).
+			errors.LogInfo(context.Background(), "TCP_FASTOPEN not supported, continuing without TFO: ", err)
 		}
 	}
 	return nil
