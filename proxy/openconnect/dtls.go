@@ -333,6 +333,11 @@ func (s *Server) dtlsReadPump(sess *ocSession, dc *dtls.Conn) {
 // alive, the device writer is handed back to it instead of unregistering —
 // ocserv keeps serving data over CSTP after DTLS dies.
 func (s *Server) teardownDTLS(sess *ocSession, pipe *ocPipe, dc *dtls.Conn) {
+	// Drop the pipe before clearing dtlsConn: a reconnecting client's
+	// ClientHello must never land on a stale pipe, and dtlsConn==nil is
+	// only observable after the pipe is gone.
+	s.dropPipe(sess, pipe)
+
 	sess.mu.Lock()
 	mine := sess.dtlsConn == dc
 	if mine {
@@ -352,7 +357,6 @@ func (s *Server) teardownDTLS(sess *ocSession, pipe *ocPipe, dc *dtls.Conn) {
 	sess.mu.Unlock()
 
 	_ = dc.Close()
-	s.dropPipe(sess, pipe)
 }
 
 // dropPipe removes and closes a session's pipe, but only if it is still the
@@ -366,6 +370,16 @@ func (s *Server) dropPipe(sess *ocSession, pipe *ocPipe) {
 	}
 	if sess.pipe == pipe {
 		sess.pipe = nil
+	}
+}
+
+// dropSessionPipe drops whatever pipe is currently registered for sess.
+func (s *Server) dropSessionPipe(sess *ocSession) {
+	s.dmuMu.Lock()
+	pipe := sess.pipe
+	s.dmuMu.Unlock()
+	if pipe != nil {
+		s.dropPipe(sess, pipe)
 	}
 }
 
