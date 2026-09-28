@@ -1,6 +1,7 @@
 package openconnect
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
@@ -51,6 +52,17 @@ func parseCredential(field string) (*credential, error) {
 	c := &credential{salt: salt}
 	copy(c.hash[:], hash)
 	return c, nil
+}
+
+// GenerateCredential produces the "salt_hex$hash_hex" password field for a
+// plaintext password, with a fresh random 16-byte salt.
+func GenerateCredential(password string) (string, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", errors.New("failed to generate salt").Base(err).AtError()
+	}
+	sum := sha256.Sum256(append(salt, password...))
+	return hex.EncodeToString(salt) + "$" + hex.EncodeToString(sum[:]), nil
 }
 
 // validate checks the inbound configuration for internal consistency.

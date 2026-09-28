@@ -28,6 +28,30 @@ func TestCredentialCheck(t *testing.T) {
 	}
 }
 
+func TestGenerateCredentialRoundtrip(t *testing.T) {
+	field, err := GenerateCredential("hunter2")
+	if err != nil {
+		t.Fatalf("GenerateCredential: %v", err)
+	}
+	cred, err := parseCredential(field)
+	if err != nil {
+		t.Fatalf("parseCredential(%q): %v", field, err)
+	}
+	if !cred.check("hunter2") {
+		t.Error("expected generated credential to verify its password")
+	}
+	if cred.check("other") {
+		t.Error("expected generated credential to reject a different password")
+	}
+	other, err := GenerateCredential("hunter2")
+	if err != nil {
+		t.Fatalf("GenerateCredential: %v", err)
+	}
+	if field == other {
+		t.Error("expected distinct salts for successive generations")
+	}
+}
+
 func TestParseCredentialRejectsMalformed(t *testing.T) {
 	for _, bad := range []string{
 		"",
