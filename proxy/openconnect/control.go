@@ -238,7 +238,8 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLo
 		_ = writeHTTP(tc, 500, "text/plain", nil, "internal error")
 		return
 	}
-	sess, err := s.registry.create(hex.EncodeToString(raw), peerIP, s.users.userByName(user))
+	u := s.users.userByName(user)
+	sess, err := s.registry.create(hex.EncodeToString(raw), peerIP, u, s.conf.l3For(u))
 	if err != nil {
 		_ = writeHTTP(tc, 500, "text/plain", nil, "internal error")
 		return

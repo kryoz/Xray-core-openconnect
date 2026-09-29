@@ -21,8 +21,10 @@ message User {
   // L3 client-to-client reachability: IP packets whose destination is the
   // virtual IP of another l3-marked connected user are relayed directly
   // between their tunnels, bypassing the L4 stack and routing rules.
-  // Pairs without the flag on both sides keep the regular behavior.
-  bool l3 = 6;
+  // Per-user override: unset falls back to the group's l3 flag (opt-in,
+  // default off), true forces relay on, false forces it off. Pairs without
+  // l3 on both sides keep the regular behavior.
+  optional bool l3 = 6;
   // Per-user DTLS override. Takes precedence over the group's dtls flag:
   // false forces the CSTP/TCP path, true forces DTLS even when the group
   // disables it. Unset falls back to the group flag (backwards compatible).
@@ -44,6 +46,9 @@ message Group {
   // not matched by X-CSTP-Split-Include out its own gateway instead of the
   // tunnel. Exclusions are sent regardless of split mode (ocserv parity).
   repeated string no_routes = 4;
+  // L3 client-to-client reachability for this group's users. Unset = false
+  // (opt-in). A user's own l3 flag overrides the group.
+  optional bool l3 = 5;
 }
 
 message OpenConnectInboundConfig {

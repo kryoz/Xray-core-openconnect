@@ -22,6 +22,7 @@ type ocSession struct {
 	appID    string // hex of the TLS session ID, advertised as X-DTLS-App-ID
 	user     *User
 	ip       netip.Addr
+	l3       bool // resolved L3 relay flag (user override → group → false); read on the hot relay path
 	psk      []byte
 	created  time.Time
 	clientIP string // client's real source IP, primary key for UDP demux
@@ -118,10 +119,10 @@ func newSessionRegistry(pool *ipPool) *sessionRegistry {
 }
 
 // create allocates a session with a fresh SID and a virtual IP.
-func (r *sessionRegistry) create(appID, clientIP string, user *User) (*ocSession, error) {
-	sess := &ocSession{appID: appID, clientIP: clientIP, user: user, created: time.Now(), lastDisc: time.Now()}
+func (r *sessionRegistry) create(appID, clientIP string, user *User, l3 bool) (*ocSession, error) {
+	sess := &ocSession{appID: appID, clientIP: clientIP, user: user, l3: l3, created: time.Now(), lastDisc: time.Now()}
 	sess.activity.Store(time.Now().UnixNano())
-	if user != nil && user.L3 {
+	if user != nil && l3 {
 		r.anyL3.Store(true)
 	}
 	if _, err := rand.Read(sess.sid[:]); err != nil {

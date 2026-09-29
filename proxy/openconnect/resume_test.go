@@ -56,6 +56,9 @@ func testPW(password string) string {
 	return hex.EncodeToString(salt) + "$" + hex.EncodeToString(sum[:])
 }
 
+// boolP returns a pointer to a bool, for building optional proto fields in tests.
+func boolP(v bool) *bool { return &v }
+
 // newTestServer builds a Server on a free localhost port, bypassing the DI path
 // (policy/dispatcher are unused by the control channel).
 func newTestServer(t *testing.T) *Server {
@@ -318,11 +321,11 @@ func TestRegistryRemoveKeepsSuccessor(t *testing.T) {
 	}
 	r := newSessionRegistry(pool)
 	u := &User{Name: "alice"}
-	old, err := r.create("app-old", "1.2.3.4", u)
+	old, err := r.create("app-old", "1.2.3.4", u, false)
 	if err != nil {
 		t.Fatalf("create old: %v", err)
 	}
-	fresh, err := r.create("app-new", "1.2.3.4", u)
+	fresh, err := r.create("app-new", "1.2.3.4", u, false)
 	if err != nil {
 		t.Fatalf("create fresh: %v", err)
 	}
@@ -348,7 +351,7 @@ func TestRegistryByVirtIP(t *testing.T) {
 	}
 	r := newSessionRegistry(pool)
 	user := &User{Name: "alice"}
-	sess, err := r.create("", "1.2.3.4", user)
+	sess, err := r.create("", "1.2.3.4", user, false)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

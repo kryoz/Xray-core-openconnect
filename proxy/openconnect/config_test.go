@@ -303,3 +303,55 @@ func TestDtlsFor(t *testing.T) {
 		t.Error("dtlsFor(user dtls=true, no group) = false, want true")
 	}
 }
+
+func TestL3For(t *testing.T) {
+	bp := func(b bool) *bool { return &b }
+	c := &OpenConnectInboundConfig{Groups: []*Group{{Name: "split"}}}
+
+	if c.l3For(nil) {
+		t.Error("l3For(nil) = true, want false")
+	}
+
+	// User without a group and without an override: false (opt-in).
+	if c.l3For(&User{}) {
+		t.Error("l3For(user without group) = true, want false")
+	}
+
+	// User in a group with l3 unset: false (opt-in).
+	if c.l3For(&User{Group: "split"}) {
+		t.Error("l3For(group, l3 unset) = true, want false")
+	}
+
+	// Group enables L3: true.
+	c.Groups[0].L3 = bp(true)
+	if !c.l3For(&User{Group: "split"}) {
+		t.Error("l3For(group l3=true) = false, want true")
+	}
+
+	// Group disables L3: false.
+	c.Groups[0].L3 = bp(false)
+	if c.l3For(&User{Group: "split"}) {
+		t.Error("l3For(group l3=false) = true, want false")
+	}
+
+	// Per-user override true beats group false.
+	c.Groups[0].L3 = bp(false)
+	if !c.l3For(&User{Group: "split", L3: bp(true)}) {
+		t.Error("l3For(user l3=true, group l3=false) = false, want true")
+	}
+
+	// Per-user override false beats group true.
+	c.Groups[0].L3 = bp(true)
+	if c.l3For(&User{Group: "split", L3: bp(false)}) {
+		t.Error("l3For(user l3=false, group l3=true) = true, want false")
+	}
+
+	// Per-user override without a group.
+	c.Groups = nil
+	if c.l3For(&User{L3: bp(false)}) {
+		t.Error("l3For(user l3=false, no group) = true, want false")
+	}
+	if !c.l3For(&User{L3: bp(true)}) {
+		t.Error("l3For(user l3=true, no group) = false, want true")
+	}
+}
