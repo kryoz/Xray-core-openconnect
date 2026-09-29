@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	stderrors "errors"
@@ -45,8 +46,10 @@ const (
 // server_random).
 type serverRandomSniffer struct {
 	net.Conn
-	mu           sync.Mutex
-	serverRandom []byte
+	// serverRandom is captured once from the first ServerHello flight and
+	// never changes after: an atomic.Pointer keeps the hot Write path free of
+	// a mutex on every packet once the random is already captured.
+	serverRandom atomic.Pointer[[]byte]
 }
 
 // Write captures the random from the first flight, then forwards.
@@ -54,11 +57,10 @@ type serverRandomSniffer struct {
 // protocol version 2 → random at 11, 32 bytes.
 func (h *serverRandomSniffer) Write(b []byte) (int, error) {
 	n, err := h.Conn.Write(b)
-	h.mu.Lock()
-	if h.serverRandom == nil && len(b) >= 43 && b[0] == 0x16 && b[5] == 0x02 {
-		h.serverRandom = append([]byte(nil), b[11:43]...)
+	if h.serverRandom.Load() == nil && len(b) >= 43 && b[0] == 0x16 && b[5] == 0x02 {
+		r := append([]byte(nil), b[11:43]...)
+		h.serverRandom.Store(&r)
 	}
-	h.mu.Unlock()
 	return n, err
 }
 
@@ -109,7 +111,9 @@ func (s *Server) handleControl(raw net.Conn) {
 		return
 	}
 	defer func() { _ = tc.Close() }()
-	kl.setServerRandom(sniff.serverRandom)
+	if sr := sniff.serverRandom.Load(); sr != nil {
+		kl.setServerRandom(*sr)
+	}
 
 	// One bufio.Reader for the whole control connection: reusing it preserves
 	// any bytes the reader buffered past the current request.
@@ -287,6 +291,28 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq, kl 
 	s.cstpPump(sess, tc, br)
 }
 
+// stfBatch packs several [acPKTData]+IP frames into one CSTP/TCP buffer, each
+// as an "STF\x1"+len+type frame, so a single tls.Conn.Write carries several
+// DATA packets: one TLS record and one write syscall instead of one per
+// packet. readCSTPFrame is stream-oriented (length-prefixed), so the peer
+// decodes them in order.
+func stfBatch(frames [][]byte) []byte {
+	total := 0
+	for _, f := range frames {
+		total += 8 + len(f) - 1 // header + IP payload (f[1:])
+	}
+	buf := make([]byte, total)
+	off := 0
+	for _, f := range frames {
+		copy(buf[off:], "STF\x01")
+		binary.BigEndian.PutUint16(buf[off+4:off+6], uint16(len(f)-1))
+		buf[off+6] = acPKTData
+		off += 8
+		off += copy(buf[off:], f[1:])
+	}
+	return buf
+}
+
 // cstpPump runs the CSTP/TCP channel after CONNECT. It parses STF-framed
 // packets, feeds DATA into the device (for clients without DTLS — CGNAT with
 // UDP blocked — this is the only data path), answers DPD, and mirrors the DTLS
@@ -312,6 +338,17 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 	deviceWriter := func(framed []byte) error { // device contract: [acPKTData]+ip
 		return writeFrame(acPKTData, framed[1:])
 	}
+	// Batch the DATA frames of one gVisor flush into a single TLS write:
+	// stfBatch concatenates N STF frames and readCSTPFrame decodes them in
+	// order. No timer coalescing across flushes (YAGNI): a 500µs coalesce
+	// timer regressed bulk downloads (Speedtest resets) — the boundary stays
+	// one WritePackets flush.
+	batchWriter := func(frames [][]byte) error {
+		wmu.Lock()
+		defer wmu.Unlock()
+		_, err := tc.Write(stfBatch(frames))
+		return err
+	}
 
 	// Own the device writer unless DTLS already took it over; when DTLS later
 	// tears down, teardownDTLS falls back to this writer. The token is kept
@@ -320,13 +357,15 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 	// defer remove exactly the entry that is live.
 	sess.mu.Lock()
 	sess.cstpWrite = deviceWriter
+	sess.cstpBatch = batchWriter
 	if sess.dtlsConn == nil {
-		sess.dtlsWriter = s.device.register(sess.ip, deviceWriter)
+		sess.dtlsWriter = s.device.registerBatch(sess.ip, deviceWriter, batchWriter)
 	}
 	sess.mu.Unlock()
 	defer func() {
 		sess.mu.Lock()
 		sess.cstpWrite = nil
+		sess.cstpBatch = nil
 		if sess.dtlsConn == nil {
 			s.device.unregisterIf(sess.ip, sess.dtlsWriter)
 			sess.dtlsWriter = nil
@@ -381,7 +420,7 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 			sess.mu.Lock()
 			if stale := sess.dtlsConn; stale != nil {
 				sess.dtlsConn = nil
-				sess.dtlsWriter = s.device.register(sess.ip, deviceWriter)
+				sess.dtlsWriter = s.device.registerBatch(sess.ip, deviceWriter, batchWriter)
 				sess.mu.Unlock()
 				// Capture the dead generation's pipe before closing: a newer
 				// generation may register its own pipe in the meantime

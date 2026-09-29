@@ -2,6 +2,7 @@ package openconnect
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
@@ -230,5 +231,72 @@ func TestCSTPDPDKillsIdleSession(t *testing.T) {
 			t.Fatal("session not marked disconnected after CSTP DPD kill")
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// TestSTFBatch verifies stfBatch packs several [acPKTData]+IP frames into one
+// CSTP/TCP buffer that readCstFrame decodes back, in order, with no trailing
+// bytes — the multi-frame DATA path used by the batch writer.
+func TestSTFBatch(t *testing.T) {
+	payloads := [][]byte{
+		[]byte("first"),
+		[]byte("second"),
+		{0x45, 0x00, 0x00}, // binary payload with embedded zeros
+	}
+	frames := make([][]byte, len(payloads))
+	for i, p := range payloads {
+		frames[i] = append([]byte{acPKTData}, p...)
+	}
+
+	buf := stfBatch(frames)
+	br := bufio.NewReader(bytes.NewReader(buf))
+	for i, want := range payloads {
+		typ, got := readCstFrame(t, br)
+		if typ != acPKTData {
+			t.Fatalf("frame %d type = %d, want %d", i, typ, acPKTData)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("frame %d payload = %x, want %x", i, got, want)
+		}
+	}
+	if br.Buffered() != 0 {
+		t.Fatalf("%d trailing bytes after batch", br.Buffered())
+	}
+}
+
+// TestCSTPDataBatch drives several DATA frames back-to-back through the CSTP
+// coalescer: the server must not drop or reorder them across timer-driven
+// flushes, and readCstFrame must decode each reply in order.
+func TestCSTPDataBatch(t *testing.T) {
+	s := newTestServer(t)
+	c2, br, sess := ocConnect(t, s)
+	defer func() { _ = c2.Close() }()
+
+	// Consume the idle keepalive frame.
+	setDeadline(t, c2, 20*time.Second)
+	if typ, _ := readCstFrame(t, br); typ != acPKTKeepalive {
+		t.Fatalf("idle frame type = %d, want keepalive %d", typ, acPKTKeepalive)
+	}
+
+	const n = 3
+	for i := 0; i < n; i++ {
+		ip := buildICMPEchoRequest(sess.ip.AsSlice(), net.IPv4(1, 1, 1, 1), 0x77, uint16(i), []byte("batch"))
+		if _, err := c2.Write(cstFrame(acPKTData, ip)); err != nil {
+			t.Fatalf("send data %d: %v", i, err)
+		}
+	}
+
+	setDeadline(t, c2, 10*time.Second)
+	for i := 0; i < n; i++ {
+		typ, reply := readCstFrame(t, br)
+		if typ != acPKTData {
+			t.Fatalf("reply %d type = %d, want DATA", i, typ)
+		}
+		if got := binary.BigEndian.Uint16(reply[24:26]); got != 0x77 {
+			t.Fatalf("reply %d id = %#x, want %#x", i, got, 0x77)
+		}
+		if got := binary.BigEndian.Uint16(reply[26:28]); got != uint16(i) {
+			t.Fatalf("reply %d seq = %d, want %d", i, got, i)
+		}
 	}
 }

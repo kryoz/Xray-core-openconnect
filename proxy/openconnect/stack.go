@@ -76,8 +76,8 @@ func newOCDevice(mtu uint32) *ocDevice {
 // ocWriter wraps one framed writer with an identity, so unregisterIf can tell
 // a stale session's writer from the live one occupying the same virtual IP.
 // batch, when non-nil, receives the frames of one gVisor flush as a single
-// call so a DTLS writer can pack several records into one datagram; f remains
-// the single-frame path (CSTP writers leave batch nil).
+// call so the writer can pack several records into one datagram (DTLS) or one
+// TLS write (CSTP); f remains the single-frame path for relay/WritePacket.
 type ocWriter struct {
 	f     func([]byte) error
 	batch func([][]byte) error
