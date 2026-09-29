@@ -216,12 +216,18 @@ func (c *OpenConnectInboundConfig) noRoutesFor(u *User) []string {
 }
 
 // dtlsFor reports whether the DTLS data channel is offered to a user's
-// sessions: the group's dtls flag when the user belongs to a group that sets
-// it, true otherwise (user without a group, group without the flag —
-// backwards compatible). Note: the generated Group.GetDtls cannot be used
-// here, it returns false for an unset field.
+// sessions: the user's own dtls flag when set, otherwise the group's dtls
+// flag, otherwise true (backwards compatible). Note: the generated
+// Group.GetDtls cannot be used here, it returns false for an unset field.
 func (c *OpenConnectInboundConfig) dtlsFor(u *User) bool {
-	if u == nil || u.Group == "" {
+	if u == nil {
+		return true
+	}
+	// Per-user override wins over the group flag; nil means "not set".
+	if u.Dtls != nil {
+		return *u.Dtls
+	}
+	if u.Group == "" {
 		return true
 	}
 	for _, g := range c.Groups {

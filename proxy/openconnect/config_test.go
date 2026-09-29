@@ -251,3 +251,55 @@ func TestValidate(t *testing.T) {
 		t.Error("expected error for camouflage realm with quote")
 	}
 }
+
+func TestDtlsFor(t *testing.T) {
+	bp := func(b bool) *bool { return &b }
+	c := &OpenConnectInboundConfig{Groups: []*Group{{Name: "split"}}}
+
+	if !c.dtlsFor(nil) {
+		t.Error("dtlsFor(nil) = false, want true")
+	}
+
+	// User without a group and without an override: true.
+	if !c.dtlsFor(&User{}) {
+		t.Error("dtlsFor(user without group) = false, want true")
+	}
+
+	// User in a group with dtls unset: true (backwards compatible).
+	if !c.dtlsFor(&User{Group: "split"}) {
+		t.Error("dtlsFor(group, dtls unset) = false, want true")
+	}
+
+	// Group disables DTLS: false.
+	c.Groups[0].Dtls = bp(false)
+	if c.dtlsFor(&User{Group: "split"}) {
+		t.Error("dtlsFor(group dtls=false) = true, want false")
+	}
+
+	// Group enables DTLS: true.
+	c.Groups[0].Dtls = bp(true)
+	if !c.dtlsFor(&User{Group: "split"}) {
+		t.Error("dtlsFor(group dtls=true) = false, want true")
+	}
+
+	// Per-user override true beats group false.
+	c.Groups[0].Dtls = bp(false)
+	if !c.dtlsFor(&User{Group: "split", Dtls: bp(true)}) {
+		t.Error("dtlsFor(user dtls=true, group dtls=false) = false, want true")
+	}
+
+	// Per-user override false beats group true.
+	c.Groups[0].Dtls = bp(true)
+	if c.dtlsFor(&User{Group: "split", Dtls: bp(false)}) {
+		t.Error("dtlsFor(user dtls=false, group dtls=true) = true, want false")
+	}
+
+	// Per-user override without a group.
+	c.Groups = nil
+	if c.dtlsFor(&User{Dtls: bp(false)}) {
+		t.Error("dtlsFor(user dtls=false, no group) = true, want false")
+	}
+	if !c.dtlsFor(&User{Dtls: bp(true)}) {
+		t.Error("dtlsFor(user dtls=true, no group) = false, want true")
+	}
+}
