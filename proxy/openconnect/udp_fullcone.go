@@ -215,7 +215,7 @@ func (s *ocStack) writeRawUDPPacket(payload []byte, src xnet.Destination, dst xn
 	}
 
 	if err := s.stack.WriteRawPacket(ocNIC, ipProtocol, buffer.MakeWithView(pkt.ToView())); err != nil {
-		return errors.New("write raw udp packet to stack ", err).AtError()
+		return errors.New("write raw udp packet to stack ", err)
 	}
 	return nil
 }

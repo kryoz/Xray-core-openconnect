@@ -39,15 +39,15 @@ func (c *credential) check(password string) bool {
 func parseCredential(field string) (*credential, error) {
 	saltHex, hashHex, ok := strings.Cut(field, "$")
 	if !ok {
-		return nil, errors.New("password must be formatted as salt_hex$hash_hex").AtError()
+		return nil, errors.New("password must be formatted as salt_hex$hash_hex")
 	}
 	salt, err := hex.DecodeString(saltHex)
 	if err != nil || len(salt) == 0 {
-		return nil, errors.New("invalid password salt").Base(err).AtError()
+		return nil, errors.New("invalid password salt").Base(err)
 	}
 	hash, err := hex.DecodeString(hashHex)
 	if err != nil || len(hash) != sha256.Size {
-		return nil, errors.New("invalid password hash").Base(err).AtError()
+		return nil, errors.New("invalid password hash").Base(err)
 	}
 	c := &credential{salt: salt}
 	copy(c.hash[:], hash)
@@ -59,7 +59,7 @@ func parseCredential(field string) (*credential, error) {
 func GenerateCredential(password string) (string, error) {
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
-		return "", errors.New("failed to generate salt").Base(err).AtError()
+		return "", errors.New("failed to generate salt").Base(err)
 	}
 	sum := sha256.Sum256(append(salt, password...))
 	return hex.EncodeToString(salt) + "$" + hex.EncodeToString(sum[:]), nil
@@ -68,39 +68,39 @@ func GenerateCredential(password string) (string, error) {
 // validate checks the inbound configuration for internal consistency.
 func (c *OpenConnectInboundConfig) validate() error {
 	if len(c.Users) == 0 {
-		return errors.New("at least one user is required").AtError()
+		return errors.New("at least one user is required")
 	}
 	prefix, err := netip.ParsePrefix(c.Subnet)
 	if err != nil {
-		return errors.New("invalid subnet: ", c.Subnet).Base(err).AtError()
+		return errors.New("invalid subnet: ", c.Subnet).Base(err)
 	}
 	if !prefix.Addr().Is4() {
-		return errors.New("subnet must be IPv4: ", c.Subnet).AtError()
+		return errors.New("subnet must be IPv4: ", c.Subnet)
 	}
 	if (c.CertFile == "") != (c.KeyFile == "") {
-		return errors.New("certFile and keyFile must both be set or both empty").AtError()
+		return errors.New("certFile and keyFile must both be set or both empty")
 	}
 	for _, ns := range c.Dns {
 		if _, err := netip.ParseAddr(ns); err != nil {
-			return errors.New("invalid dns server: ", ns).Base(err).AtError()
+			return errors.New("invalid dns server: ", ns).Base(err)
 		}
 	}
 	groupNames := make(map[string]struct{}, len(c.Groups))
 	for _, g := range c.Groups {
 		if g.Name == "" {
-			return errors.New("route group name must not be empty").AtError()
+			return errors.New("route group name must not be empty")
 		}
 		if _, dup := groupNames[g.Name]; dup {
-			return errors.New("duplicate route group: ", g.Name).AtError()
+			return errors.New("duplicate route group: ", g.Name)
 		}
 		for _, r := range g.Routes {
 			if err := validateRoute(r); err != nil {
-				return errors.New("route group ", g.Name, ": ").Base(err).AtError()
+				return errors.New("route group ", g.Name, ": ").Base(err)
 			}
 		}
 		for _, r := range g.NoRoutes {
 			if err := validateRoute(r); err != nil {
-				return errors.New("route group ", g.Name, ": ").Base(err).AtError()
+				return errors.New("route group ", g.Name, ": ").Base(err)
 			}
 		}
 		groupNames[g.Name] = struct{}{}
@@ -109,42 +109,42 @@ func (c *OpenConnectInboundConfig) validate() error {
 	staticIPs := make(map[netip.Addr]string, len(c.Users))
 	for _, u := range c.Users {
 		if u.Name == "" {
-			return errors.New("user name must not be empty").AtError()
+			return errors.New("user name must not be empty")
 		}
 		if _, dup := seen[u.Name]; dup {
-			return errors.New("duplicate user: ", u.Name).AtError()
+			return errors.New("duplicate user: ", u.Name)
 		}
 		seen[u.Name] = struct{}{}
 		if _, err := parseCredential(u.Password); err != nil {
-			return errors.New("user ", u.Name, ": ").Base(err).AtError()
+			return errors.New("user ", u.Name, ": ").Base(err)
 		}
 		if u.Ip != "" {
 			ip, err := netip.ParseAddr(u.Ip)
 			if err != nil {
-				return errors.New("user ", u.Name, ": invalid static ip: ", u.Ip).Base(err).AtError()
+				return errors.New("user ", u.Name, ": invalid static ip: ", u.Ip).Base(err)
 			}
 			if !prefix.Contains(ip) {
-				return errors.New("user ", u.Name, ": static ip ", u.Ip, " outside subnet ", c.Subnet).AtError()
+				return errors.New("user ", u.Name, ": static ip ", u.Ip, " outside subnet ", c.Subnet)
 			}
 			if ip == prefix.Addr() || ip == ipv4Broadcast(prefix) {
-				return errors.New("user ", u.Name, ": static ip ", u.Ip, " is a network/broadcast address").AtError()
+				return errors.New("user ", u.Name, ": static ip ", u.Ip, " is a network/broadcast address")
 			}
 			if ip == firstHost(prefix) {
-				return errors.New("user ", u.Name, ": static ip ", u.Ip, " is the gateway/DNS address of the subnet").AtError()
+				return errors.New("user ", u.Name, ": static ip ", u.Ip, " is the gateway/DNS address of the subnet")
 			}
 			if other, dup := staticIPs[ip]; dup {
-				return errors.New("duplicate static ip ", u.Ip, " for users ", other, " and ", u.Name).AtError()
+				return errors.New("duplicate static ip ", u.Ip, " for users ", other, " and ", u.Name)
 			}
 			staticIPs[ip] = u.Name
 		}
 		for _, r := range u.Routes {
 			if err := validateRoute(r); err != nil {
-				return errors.New("user ", u.Name, ": ").Base(err).AtError()
+				return errors.New("user ", u.Name, ": ").Base(err)
 			}
 		}
 		if u.Group != "" {
 			if _, ok := groupNames[u.Group]; !ok {
-				return errors.New("user ", u.Name, ": unknown route group: ", u.Group).AtError()
+				return errors.New("user ", u.Name, ": unknown route group: ", u.Group)
 			}
 		}
 	}
@@ -156,18 +156,18 @@ func (c *OpenConnectInboundConfig) validate() error {
 	// The camouflage secret is matched against the raw query string, so it
 	// must be a single unencoded token; the realm lands in a response header.
 	if strings.ContainsAny(c.CamouflageSecret, "?& \t\r\n") {
-		return errors.New("camouflageSecret must not contain '?', '&', whitespace or CR/LF").AtError()
+		return errors.New("camouflageSecret must not contain '?', '&', whitespace or CR/LF")
 	}
 	if strings.ContainsAny(c.CamouflageRealm, "\"\r\n") {
-		return errors.New("camouflageRealm must not contain quotes or CR/LF").AtError()
+		return errors.New("camouflageRealm must not contain quotes or CR/LF")
 	}
 	if c.Mtu != 0 && (c.Mtu < MinMTU || c.Mtu > MaxMTU) {
-		return errors.New("mtu out of range [", MinMTU, ",", MaxMTU, "]: ", c.Mtu).AtError()
+		return errors.New("mtu out of range [", MinMTU, ",", MaxMTU, "]: ", c.Mtu)
 	}
 	switch c.Cipher {
 	case "", "auto", "aes128gcm", "chacha20poly1305":
 	default:
-		return errors.New("cipher must be one of auto, aes128gcm, chacha20poly1305: ", c.Cipher).AtError()
+		return errors.New("cipher must be one of auto, aes128gcm, chacha20poly1305: ", c.Cipher)
 	}
 	return nil
 }
@@ -236,10 +236,10 @@ func (c *OpenConnectInboundConfig) dtlsFor(u *User) bool {
 func validateRoute(r string) error {
 	p, err := netip.ParsePrefix(r)
 	if err != nil {
-		return errors.New("invalid route (want IPv4 CIDR): ", r).Base(err).AtError()
+		return errors.New("invalid route (want IPv4 CIDR): ", r).Base(err)
 	}
 	if !p.Addr().Is4() {
-		return errors.New("route must be IPv4: ", r).AtError()
+		return errors.New("route must be IPv4: ", r)
 	}
 	return nil
 }

@@ -632,17 +632,17 @@ func createOCStack(ep stack.LinkEndpoint) (*stack.Stack, error) {
 	gStack := stack.New(opts)
 
 	if err := gStack.CreateNIC(ocNIC, ep); err != nil {
-		return nil, errors.New(err.String()).AtError()
+		return nil, errors.New(err.String())
 	}
 	gStack.SetRouteTable([]tcpip.Route{
 		{Destination: header.IPv4EmptySubnet, NIC: ocNIC},
 		{Destination: header.IPv6EmptySubnet, NIC: ocNIC},
 	})
 	if err := gStack.SetSpoofing(ocNIC, true); err != nil {
-		return nil, errors.New(err.String()).AtError()
+		return nil, errors.New(err.String())
 	}
 	if err := gStack.SetPromiscuousMode(ocNIC, true); err != nil {
-		return nil, errors.New(err.String()).AtError()
+		return nil, errors.New(err.String())
 	}
 	return gStack, nil
 }

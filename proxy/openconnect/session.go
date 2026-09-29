@@ -125,12 +125,12 @@ func (r *sessionRegistry) create(appID, clientIP string, user *User) (*ocSession
 		r.anyL3.Store(true)
 	}
 	if _, err := rand.Read(sess.sid[:]); err != nil {
-		return nil, errors.New("generate sid").Base(err).AtError()
+		return nil, errors.New("generate sid").Base(err)
 	}
 	if user.Ip != "" {
 		ip, err := netip.ParseAddr(user.Ip)
 		if err != nil {
-			return nil, errors.New("bad static ip for user ").Base(err).AtError()
+			return nil, errors.New("bad static ip for user ").Base(err)
 		}
 		sess.ip = ip
 	} else {
@@ -249,10 +249,10 @@ type ipPool struct {
 func newIPPool(subnet string) (*ipPool, error) {
 	prefix, err := netip.ParsePrefix(subnet)
 	if err != nil {
-		return nil, errors.New("invalid subnet: ", subnet).Base(err).AtError()
+		return nil, errors.New("invalid subnet: ", subnet).Base(err)
 	}
 	if !prefix.Addr().Is4() {
-		return nil, errors.New("subnet must be IPv4: ", subnet).AtError()
+		return nil, errors.New("subnet must be IPv4: ", subnet)
 	}
 	// Mask the base address: netip.ParsePrefix keeps it as written ("10.0.0.5/24"
 	// stays .5), and the pool would then hand out addresses outside the subnet.
@@ -264,7 +264,7 @@ func newIPPool(subnet string) (*ipPool, error) {
 	// A /30 is the smallest usable pool: one dynamic address left after
 	// network, gateway and broadcast are skipped.
 	if 32-ones < 2 {
-		return nil, errors.New("subnet too small: ", subnet).AtError()
+		return nil, errors.New("subnet too small: ", subnet)
 	}
 	return &ipPool{prefix: prefix, ones: ones, next: 2, allocated: make(map[netip.Addr]struct{})}, nil
 }
@@ -273,11 +273,11 @@ func newIPPool(subnet string) (*ipPool, error) {
 func prefixOnes(cidr string) (int, error) {
 	i := strings.LastIndexByte(cidr, '/')
 	if i < 0 {
-		return 0, errors.New("subnet must be CIDR: ", cidr).AtError()
+		return 0, errors.New("subnet must be CIDR: ", cidr)
 	}
 	n, err := strconv.Atoi(cidr[i+1:])
 	if err != nil || n < 0 || n > 32 {
-		return 0, errors.New("invalid subnet prefix: ", cidr).AtError()
+		return 0, errors.New("invalid subnet prefix: ", cidr)
 	}
 	return n, nil
 }
@@ -312,7 +312,7 @@ func (p *ipPool) alloc() (netip.Addr, error) {
 			return addr, nil
 		}
 	}
-	return netip.Addr{}, errors.New("ip pool exhausted: ", p.prefix.String()).AtError()
+	return netip.Addr{}, errors.New("ip pool exhausted: ", p.prefix.String())
 }
 
 func (p *ipPool) release(ip netip.Addr) {
