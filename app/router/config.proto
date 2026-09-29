@@ -94,6 +94,18 @@ message StrategyLeastLoadConfig {
   float tolerance = 6;
 }
 
+message StrategyFailoverConfig {
+  // Number of consecutive failed probes required to mark an outbound as
+  // down and fail over to the next one. Default 2.
+  //
+  // Outbounds must be covered by the observatory's subjectSelector to be
+  // observed; unobserved outbounds are always considered up. When all
+  // candidates are down an empty tag is returned, so set the balancing
+  // rule's fallbackTag to route traffic elsewhere (without it the default
+  // outbound handler is used).
+  int32 fail_threshold = 1;
+}
+
 message Config {
   enum DomainStrategy {
     // Use domain as is.

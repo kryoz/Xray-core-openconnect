@@ -100,7 +100,7 @@ func OriginalDst(la, ra net.Addr) (net.IP, int, error) {
 	return odIP, int(net.PortFromBytes(odPort[:2])), nil
 }
 
-func applyOutboundSocketOptions(network string, address string, fd uintptr, config *SocketConfig) error {
+func applyOutboundSocketOptions(ctx context.Context, network string, address string, fd uintptr, config *SocketConfig) error {
 	if isTCPSocket(network) {
 		tfo := config.ParseTFOValue()
 		if tfo > 0 {
@@ -108,7 +108,9 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 		}
 		if tfo >= 0 {
 			if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_FASTOPEN, tfo); err != nil {
-				return err
+				// Connect-TFO is best-effort: a kernel without it must
+				// degrade to plain TCP, not fail the dial.
+				errors.LogInfo(ctx, "TCP_FASTOPEN not supported, continuing without TFO: ", err)
 			}
 		}
 

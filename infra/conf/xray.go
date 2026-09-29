@@ -34,6 +34,7 @@ var (
 		"wireguard":     func() interface{} { return &WireGuardConfig{IsClient: false} },
 		"hysteria":      func() interface{} { return new(HysteriaServerConfig) },
 		"tun":           func() interface{} { return new(TunConfig) },
+		"openconnect":   func() interface{} { return new(OpenConnectConfig) },
 	}, "protocol", "settings")
 
 	outboundConfigLoader = NewJSONConfigLoader(ConfigCreatorCache{

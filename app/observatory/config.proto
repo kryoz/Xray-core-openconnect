@@ -47,6 +47,9 @@ message OutboundStatus{
   int64 last_try_time = 6;
 
   HealthPingMeasurementResult health_ping = 7;
+  /* @Document The number of consecutive failed probes
+  */
+  int64 fail_streak = 8;
 }
 
 message ProbeResult{

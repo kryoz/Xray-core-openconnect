@@ -4,6 +4,34 @@
 
 [README](https://github.com/XTLS/Xray-core#readme) is open, so feel free to submit your project [here](https://github.com/XTLS/Xray-core/pulls).
 
+## Fork features
+
+This fork (branch `ocserv`) adds an **OpenConnect / Cisco AnyConnect inbound** — a drop-in, ocserv-compatible VPN server, so standard OpenConnect clients (Linux, Android, iOS, macOS) connect to Xray natively:
+
+- **Control channel** — TLS 1.2 with ocserv-compatible HTTP auth forms (single-round username/password for mobile clients), cookie & resume
+- **Data channel** — DTLS 1.2 PSK over a gVisor userspace TCP/UDP/ICMP stack, with a pure-CSTP-over-TCP fallback for CGNAT / UDP-blocked networks
+- **ocserv parity** — camouflage (`camouflageSecret` / `camouflageRealm`, byte-compatible 401/404), DTLS cipher pinning, MTU 1500, per-user and per-group split routing (`X-CSTP-Split-Include` / `X-CSTP-Split-Exclude`)
+- **Per-group DTLS kill switch** (`dtls: false`) for carriers that throttle UDP
+- Virtual IP pool, DPD/keepalive, MTU discovery, per-user traffic stats, client-to-client L3 relay
+
+Also in this fork:
+
+- **Router: `failover` balancing strategy** — traffic sticks to the highest-priority outbound and fails over only after N consecutive failed observatory probes, with automatic failback (set `fallbackTag` on the balancing rule for the all-down case)
+- **Strict egress socket options** — dialing fails (instead of silently leaking to the host's default route) when outbound socket options such as `interface` cannot be applied
+
+Full config [example](https://github.com/kryoz/Xray-core-openconnect/wiki/OpenConnect-example-config).
+
+User management:
+
+```bash
+xray openconnect hash [<password>]
+xray openconnect add    -c cfg.json [-in tag] [-ip 10.66.0.5] <name> <password>
+xray openconnect list   -c cfg.json [-in tag]
+xray openconnect passwd -c cfg.json <name> <password>
+xray openconnect rm     -c cfg.json <name>
+```
+
+
 ## Sponsors
 
 [![Remnawave](https://github.com/user-attachments/assets/a22d34ae-01ee-441c-843a-85356748ed1e)](https://docs.rw)

@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package xray.proxy.openconnect;
+option csharp_namespace = "Xray.Proxy.OpenConnect";
+option go_package = "github.com/xtls/xray-core/proxy/openconnect";
+option java_package = "com.xray.proxy.openconnect";
+option java_multiple_files = true;
+
+message User {
+  string name = 1;
+  // Salted SHA-256, format "salt_hex$hash_hex".
+  string password = 2;
+  // Optional static IP address assigned to this user.
+  string ip = 3;
+  // Split-routing override: when non-empty, used instead of the
+  // inbound-level routes for this user's sessions.
+  repeated string routes = 4;
+  // Named route-group membership; group routes are advertised before the
+  // user's own routes. Must reference an inbound-level group by name.
+  string group = 5;
+  // L3 client-to-client reachability: IP packets whose destination is the
+  // virtual IP of another l3-marked connected user are relayed directly
+  // between their tunnels, bypassing the L4 stack and routing rules.
+  // Pairs without the flag on both sides keep the regular behavior.
+  bool l3 = 6;
+}
+// Group is a named set of split-routing networks shared by users.
+message Group {
+  string name = 1;
+  repeated string routes = 2;
+  // DTLS data-channel offer for this group's users. When false, the CONNECT
+  // response omits the X-DTLS-* headers and UDP ClientHellos are silently
+  // dropped, keeping the group on the CSTP/TCP path (e.g. mobile carriers
+  // throttling UDP would otherwise cause an endless DTLS↔CSTP ping-pong).
+  // Unset = true (DTLS offered, backwards compatible).
+  optional bool dtls = 3;
+  // Split-routing exclusions (IPv4 CIDR) advertised to the client as
+  // X-CSTP-Split-Exclude, mirroring ocserv's no-route directive. With split
+  // routing, no_routes = ["0.0.0.0/0"] tells the client to send everything
+  // not matched by X-CSTP-Split-Include out its own gateway instead of the
+  // tunnel. Exclusions are sent regardless of split mode (ocserv parity).
+  repeated string no_routes = 4;
+}
+
+message OpenConnectInboundConfig {
+  repeated User users = 1;
+  // Virtual address pool, e.g. "10.66.0.0/24".
+  string subnet = 2;
+  repeated string dns = 3;
+  // Base MTU advertised to the client. Default 1500, clamped down to the
+  // listen interface's MTU.
+  uint32 mtu = 4;
+  // Dead-peer detection interval in seconds. Default 90.
+  uint32 dpd = 5;
+  // Cookie validity after tunnel disconnect, in seconds. Default 300.
+  uint32 cookie_timeout = 6;
+  string cert_file = 7;
+  string key_file = 8;
+  uint32 max_clients = 9;
+  // UDP (DTLS) listen port. 0 = same as the TCP listen port.
+  uint32 dtls_port = 10;
+  // Split-routing networks (IPv4 CIDR) advertised to the client as
+  // X-CSTP-Split-Include. When set, the client routes only these networks
+  // through the tunnel instead of pulling its default route.
+  repeated string routes = 11;
+  // ocserv-compatible camouflage. When set, GET/POST requests that carry
+  // neither the secret as the whole query string (client URL like
+  // "https://host/?<secret>") nor a valid session cookie are answered as a
+  // plain web server: 401 with camouflage_realm if set, otherwise 404. The
+  // check passes for the rest of the connection once matched. Empty = off.
+  string camouflage_secret = 12;
+  // Realm advertised in the 401 WWW-Authenticate header. Empty = plain 404.
+  string camouflage_realm = 13;
+  // Named route groups referenced by User.group.
+  repeated Group groups = 14;
+  // DTLS cipher suite offer. "auto" (default) offers both
+  // TLS_PSK_WITH_AES_128_GCM_SHA256 and TLS_PSK_WITH_CHACHA20_POLY1305_SHA256
+  // and the client picks by its own preference; "aes128gcm" or
+  // "chacha20poly1305" pin one suite (AES-GCM is several times cheaper per
+  // byte on AES-NI hosts).
+  string cipher = 15;
+}
