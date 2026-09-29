@@ -346,7 +346,7 @@ func (s *Server) teardownDTLS(sess *ocSession, pipe *ocPipe, dc *dtls.Conn) {
 			// Hand the device writer back to the live CSTP pump. The token
 			// becomes the session's current registration so the pump's own
 			// teardown removes exactly this entry.
-			sess.dtlsWriter = s.device.register(sess.ip, sess.cstpWrite)
+			sess.dtlsWriter = s.device.registerBatch(sess.ip, sess.cstpWrite, sess.cstpBatch)
 		} else {
 			s.device.unregisterIf(sess.ip, sess.dtlsWriter)
 			sess.dtlsWriter = nil

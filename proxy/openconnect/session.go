@@ -34,9 +34,10 @@ type ocSession struct {
 	// contend with the control path's dtlsConn/dtlsWriter transactions.
 	activity atomic.Int64
 
-	dtlsConn  *dtls.Conn         // established DTLS data channel (nil until handshake)
-	pipe      *ocPipe            // UDP demux pipe backing the DTLS conn (for NAT rebinding)
-	cstpWrite func([]byte) error // live CSTP/TCP fallback writer; nil once the TCP conn closes
+	dtlsConn  *dtls.Conn           // established DTLS data channel (nil until handshake)
+	pipe      *ocPipe              // UDP demux pipe backing the DTLS conn (for NAT rebinding)
+	cstpWrite func([]byte) error   // live CSTP/TCP fallback writer; nil once the TCP conn closes
+	cstpBatch func([][]byte) error // CSTP batch writer; nil once the TCP conn closes
 	// dtlsWriter is the device writer token this session's live DTLS
 	// generation registered; teardown unregisters it only while it still
 	// owns the slot (two sessions of one user may share a static virtual IP).
