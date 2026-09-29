@@ -154,6 +154,25 @@ func (br *BalancingRule) Build(ohm outbound.Manager, dispatcher routing.Dispatch
 			fallbackTag: br.FallbackTag,
 			strategy:    leastLoadStrategy,
 		}, nil
+	case "failover":
+		var s *StrategyFailoverConfig
+		if br.StrategySettings != nil {
+			i, err := br.StrategySettings.GetInstance()
+			if err != nil {
+				return nil, err
+			}
+			var ok bool
+			s, ok = i.(*StrategyFailoverConfig)
+			if !ok {
+				return nil, errors.New("not a StrategyFailoverConfig").AtError()
+			}
+		}
+		return &Balancer{
+			selectors:   br.OutboundSelector,
+			ohm:         ohm,
+			fallbackTag: br.FallbackTag,
+			strategy:    NewFailoverStrategy(br.OutboundSelector, s),
+		}, nil
 	case "random":
 		fallthrough
 	case "":

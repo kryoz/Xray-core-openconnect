@@ -13,7 +13,7 @@ import (
 
 // applyOutboundSocketOptions applies socket options for outbound connection.
 // note that unlike other part of Xray, this function needs network with speified network stack(tcp4/tcp6/udp4/udp6)
-func applyOutboundSocketOptions(network string, address string, fd uintptr, config *SocketConfig) error {
+func applyOutboundSocketOptions(ctx context.Context, network string, address string, fd uintptr, config *SocketConfig) error {
 	if config.Mark != 0 {
 		if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_MARK, int(config.Mark)); err != nil {
 			return errors.New("failed to set SO_MARK").Base(err)
@@ -33,13 +33,18 @@ func applyOutboundSocketOptions(network string, address string, fd uintptr, conf
 		}
 		if tfo >= 0 {
 			if err := syscall.SetsockoptInt(int(fd), syscall.SOL_TCP, unix.TCP_FASTOPEN_CONNECT, tfo); err != nil {
-				return errors.New("failed to set TCP_FASTOPEN_CONNECT", tfo).Base(err)
+				// Connect-TFO is best-effort: a kernel without it must
+				// degrade to plain TCP, not fail the dial.
+				errors.LogInfo(ctx, "TCP_FASTOPEN_CONNECT not supported, continuing without TFO: ", err)
 			}
 		}
 
 		if config.TcpCongestion != "" {
 			if err := syscall.SetsockoptString(int(fd), syscall.SOL_TCP, syscall.TCP_CONGESTION, config.TcpCongestion); err != nil {
-				return errors.New("failed to set TCP_CONGESTION", err)
+				// Congestion algorithm is tuning, not egress identity: an
+				// unknown algorithm (or a kernel without the module) must
+				// degrade to the kernel default, not fail the dial.
+				errors.LogInfo(ctx, "TCP_CONGESTION not applied, continuing with kernel default: ", err)
 			}
 		}
 

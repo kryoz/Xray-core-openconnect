@@ -1,6 +1,10 @@
 package observatory
 
-import "testing"
+import (
+	"context"
+	"sync"
+	"testing"
+)
 
 func TestObserverUpdateStatusPrunesStaleOutbounds(t *testing.T) {
 	observer := &Observer{
@@ -61,4 +65,41 @@ func TestObserverUpdateStatusClearsWhenNoOutboundsRemain(t *testing.T) {
 	if len(observer.status) != 0 {
 		t.Fatalf("expected all statuses to be removed, got %d", len(observer.status))
 	}
+}
+
+// TestGetObservationConcurrentWithUpdates runs probe-side status updates
+// against GetObservation readers under the race detector: GetObservation must
+// return a snapshot, so readers never touch the probe loop's live state.
+func TestGetObservationConcurrentWithUpdates(t *testing.T) {
+	observer := &Observer{}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			observer.updateStatusForResult("tag", &ProbeResult{Alive: i%2 == 0, Delay: 10})
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		msg, err := observer.GetObservation(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, ok := msg.(*ObservationResult)
+		if !ok {
+			t.Fatal("unexpected observation type")
+		}
+		for _, s := range result.Status {
+			_ = s.OutboundTag
+			_ = s.FailStreak
+		}
+	}
+	close(stop)
+	wg.Wait()
 }

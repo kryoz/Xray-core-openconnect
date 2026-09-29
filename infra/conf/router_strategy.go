@@ -15,6 +15,7 @@ const (
 	strategyLeastPing  string = "leastping"
 	strategyRoundRobin string = "roundrobin"
 	strategyLeastLoad  string = "leastload"
+	strategyFailover   string = "failover"
 )
 
 var strategyConfigLoader = NewJSONConfigLoader(ConfigCreatorCache{
@@ -22,6 +23,7 @@ var strategyConfigLoader = NewJSONConfigLoader(ConfigCreatorCache{
 	strategyLeastPing:  func() interface{} { return new(strategyEmptyConfig) },
 	strategyRoundRobin: func() interface{} { return new(strategyEmptyConfig) },
 	strategyLeastLoad:  func() interface{} { return new(strategyLeastLoadConfig) },
+	strategyFailover:   func() interface{} { return new(strategyFailoverConfig) },
 }, "type", "settings")
 
 type strategyEmptyConfig struct{}
@@ -41,6 +43,23 @@ type strategyLeastLoadConfig struct {
 	MaxRTT duration.Duration `json:"maxRTT,omitempty"`
 	// acceptable failure rate
 	Tolerance float64 `json:"tolerance,omitempty"`
+}
+
+type strategyFailoverConfig struct {
+	// FailThreshold is the number of consecutive failed probes required to
+	// fail over from an outbound. Default 2. Outbounds must be covered by
+	// the observatory's subjectSelector; unobserved outbounds are always
+	// considered up. Set the balancing rule's fallbackTag for the all-down
+	// case, otherwise the default outbound handler is used.
+	FailThreshold int `json:"failThreshold,omitempty"`
+}
+
+// Build implements Buildable.
+func (v *strategyFailoverConfig) Build() (proto.Message, error) {
+	if v.FailThreshold < 0 {
+		v.FailThreshold = 0
+	}
+	return &router.StrategyFailoverConfig{FailThreshold: int32(v.FailThreshold)}, nil
 }
 
 // HealthCheckSettings holds settings for health Checker
