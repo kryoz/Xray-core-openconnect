@@ -238,6 +238,29 @@ func (c *OpenConnectInboundConfig) dtlsFor(u *User) bool {
 	return true
 }
 
+// l3For reports whether a user's sessions participate in the L3
+// client↔client relay: the user's own l3 flag when set, otherwise the
+// group's l3 flag, otherwise false. Unlike dtlsFor (opt-out via unset=true),
+// L3 is opt-in: an unset flag anywhere means off.
+func (c *OpenConnectInboundConfig) l3For(u *User) bool {
+	if u == nil {
+		return false
+	}
+	// Per-user override wins over the group flag; nil means "not set".
+	if u.L3 != nil {
+		return *u.L3
+	}
+	if u.Group == "" {
+		return false
+	}
+	for _, g := range c.Groups {
+		if g.Name == u.Group {
+			return g.L3 != nil && *g.L3
+		}
+	}
+	return false
+}
+
 // validateRoute checks one split-routing network: IPv4 CIDR.
 func validateRoute(r string) error {
 	p, err := netip.ParsePrefix(r)

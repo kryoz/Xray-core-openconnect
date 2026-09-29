@@ -37,8 +37,10 @@ type User struct {
 	// L3 client-to-client reachability: IP packets whose destination is the
 	// virtual IP of another l3-marked connected user are relayed directly
 	// between their tunnels, bypassing the L4 stack and routing rules.
-	// Pairs without the flag on both sides keep the regular behavior.
-	L3 bool `protobuf:"varint,6,opt,name=l3,proto3" json:"l3,omitempty"`
+	// Per-user override: unset falls back to the group's l3 flag (opt-in,
+	// default off), true forces relay on, false forces it off. Pairs without
+	// l3 on both sides keep the regular behavior.
+	L3 *bool `protobuf:"varint,6,opt,name=l3,proto3,oneof" json:"l3,omitempty"`
 	// Per-user DTLS override. Takes precedence over the group's dtls flag:
 	// false forces the CSTP/TCP path, true forces DTLS even when the group
 	// disables it. Unset falls back to the group flag (backwards compatible).
@@ -113,8 +115,8 @@ func (x *User) GetGroup() string {
 }
 
 func (x *User) GetL3() bool {
-	if x != nil {
-		return x.L3
+	if x != nil && x.L3 != nil {
+		return *x.L3
 	}
 	return false
 }
@@ -142,7 +144,10 @@ type Group struct {
 	// routing, no_routes = ["0.0.0.0/0"] tells the client to send everything
 	// not matched by X-CSTP-Split-Include out its own gateway instead of the
 	// tunnel. Exclusions are sent regardless of split mode (ocserv parity).
-	NoRoutes      []string `protobuf:"bytes,4,rep,name=no_routes,json=noRoutes,proto3" json:"no_routes,omitempty"`
+	NoRoutes []string `protobuf:"bytes,4,rep,name=no_routes,json=noRoutes,proto3" json:"no_routes,omitempty"`
+	// L3 client-to-client reachability for this group's users. Unset = false
+	// (opt-in). A user's own l3 flag overrides the group.
+	L3            *bool `protobuf:"varint,5,opt,name=l3,proto3,oneof" json:"l3,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -203,6 +208,13 @@ func (x *Group) GetNoRoutes() []string {
 		return x.NoRoutes
 	}
 	return nil
+}
+
+func (x *Group) GetL3() bool {
+	if x != nil && x.L3 != nil {
+		return *x.L3
+	}
+	return false
 }
 
 type OpenConnectInboundConfig struct {
@@ -386,22 +398,25 @@ var File_proxy_openconnect_config_proto protoreflect.FileDescriptor
 
 const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\n" +
-	"\x1eproxy/openconnect/config.proto\x12\x16xray.proxy.openconnect\"\xa6\x01\n" +
+	"\x1eproxy/openconnect/config.proto\x12\x16xray.proxy.openconnect\"\xb2\x01\n" +
 	"\x04User\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12\x0e\n" +
 	"\x02ip\x18\x03 \x01(\tR\x02ip\x12\x16\n" +
 	"\x06routes\x18\x04 \x03(\tR\x06routes\x12\x14\n" +
-	"\x05group\x18\x05 \x01(\tR\x05group\x12\x0e\n" +
-	"\x02l3\x18\x06 \x01(\bR\x02l3\x12\x17\n" +
-	"\x04dtls\x18\a \x01(\bH\x00R\x04dtls\x88\x01\x01B\a\n" +
-	"\x05_dtls\"r\n" +
+	"\x05group\x18\x05 \x01(\tR\x05group\x12\x13\n" +
+	"\x02l3\x18\x06 \x01(\bH\x00R\x02l3\x88\x01\x01\x12\x17\n" +
+	"\x04dtls\x18\a \x01(\bH\x01R\x04dtls\x88\x01\x01B\x05\n" +
+	"\x03_l3B\a\n" +
+	"\x05_dtls\"\x8e\x01\n" +
 	"\x05Group\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06routes\x18\x02 \x03(\tR\x06routes\x12\x17\n" +
 	"\x04dtls\x18\x03 \x01(\bH\x00R\x04dtls\x88\x01\x01\x12\x1b\n" +
-	"\tno_routes\x18\x04 \x03(\tR\bnoRoutesB\a\n" +
-	"\x05_dtls\"\xf8\x03\n" +
+	"\tno_routes\x18\x04 \x03(\tR\bnoRoutes\x12\x13\n" +
+	"\x02l3\x18\x05 \x01(\bH\x01R\x02l3\x88\x01\x01B\a\n" +
+	"\x05_dtlsB\x05\n" +
+	"\x03_l3\"\xf8\x03\n" +
 	"\x18OpenConnectInboundConfig\x122\n" +
 	"\x05users\x18\x01 \x03(\v2\x1c.xray.proxy.openconnect.UserR\x05users\x12\x16\n" +
 	"\x06subnet\x18\x02 \x01(\tR\x06subnet\x12\x10\n" +

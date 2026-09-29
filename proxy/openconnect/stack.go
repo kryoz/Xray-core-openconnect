@@ -192,11 +192,11 @@ func (d *ocDevice) relayL3(p ocRxPkt) bool {
 		return false
 	}
 	dstSess := d.registry.getByVirtIP(dst)
-	if dstSess == nil || dstSess.user == nil || !dstSess.user.L3 {
+	if dstSess == nil || !dstSess.l3 {
 		return false
 	}
 	srcSess := d.registry.getByVirtIP(p.from)
-	if srcSess == nil || srcSess.user == nil || !srcSess.user.L3 {
+	if srcSess == nil || !srcSess.l3 {
 		return false
 	}
 	if ocSrcIP(p.frame[1:]) != p.from {
@@ -219,11 +219,15 @@ func (d *ocDevice) relayL3(p ocRxPkt) bool {
 		d.downlinkCounter.Add(int64(len(p.frame) - 1))
 	}
 	if d.userCounter != nil {
-		if c := d.userCounter(srcSess.user.Name, "uplink"); c != nil {
-			c.Add(int64(len(p.frame) - 1))
+		if srcSess.user != nil {
+			if c := d.userCounter(srcSess.user.Name, "uplink"); c != nil {
+				c.Add(int64(len(p.frame) - 1))
+			}
 		}
-		if c := d.userCounter(dstSess.user.Name, "downlink"); c != nil {
-			c.Add(int64(len(p.frame) - 1))
+		if dstSess.user != nil {
+			if c := d.userCounter(dstSess.user.Name, "downlink"); c != nil {
+				c.Add(int64(len(p.frame) - 1))
+			}
 		}
 	}
 	return true

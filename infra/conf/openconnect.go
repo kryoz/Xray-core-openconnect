@@ -11,7 +11,7 @@ type OpenConnectUserConfig struct {
 	IP       string   `json:"ip,omitempty"`
 	Routes   []string `json:"routes,omitempty"`
 	Group    string   `json:"group,omitempty"`
-	L3       bool     `json:"l3,omitempty"`
+	L3       *bool    `json:"l3,omitempty"`
 }
 
 type OpenConnectGroupConfig struct {
@@ -19,6 +19,7 @@ type OpenConnectGroupConfig struct {
 	Routes   []string `json:"routes"`
 	NoRoutes []string `json:"noRoutes,omitempty"`
 	Dtls     *bool    `json:"dtls,omitempty"`
+	L3       *bool    `json:"l3,omitempty"`
 }
 
 type OpenConnectConfig struct {
@@ -72,6 +73,7 @@ func (c *OpenConnectConfig) Build() (proto.Message, error) {
 			Routes:   c.Groups[i].Routes,
 			NoRoutes: c.Groups[i].NoRoutes,
 			Dtls:     c.Groups[i].Dtls,
+			L3:       c.Groups[i].L3,
 		}
 	}
 	return config, nil

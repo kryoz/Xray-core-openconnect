@@ -174,18 +174,18 @@ func TestRelayL3(t *testing.T) {
 		t.Fatalf("pool: %v", err)
 	}
 	reg := newSessionRegistry(pool)
-	uA := &User{Name: "a", Password: testPW("x"), Ip: "10.99.0.10", L3: true}
-	uB := &User{Name: "b", Password: testPW("x"), Ip: "10.99.0.11", L3: true}
+	uA := &User{Name: "a", Password: testPW("x"), Ip: "10.99.0.10", L3: boolP(true)}
+	uB := &User{Name: "b", Password: testPW("x"), Ip: "10.99.0.11", L3: boolP(true)}
 	uC := &User{Name: "c", Password: testPW("x"), Ip: "10.99.0.12"}
-	sessA, err := reg.create("", "", uA)
+	sessA, err := reg.create("", "", uA, true)
 	if err != nil {
 		t.Fatalf("sessA: %v", err)
 	}
-	sessB, err := reg.create("", "", uB)
+	sessB, err := reg.create("", "", uB, true)
 	if err != nil {
 		t.Fatalf("sessB: %v", err)
 	}
-	sessC, err := reg.create("", "", uC)
+	sessC, err := reg.create("", "", uC, false)
 	if err != nil {
 		t.Fatalf("sessC: %v", err)
 	}
@@ -256,8 +256,8 @@ func TestRelayL3(t *testing.T) {
 func TestL3ClientToClientRelay(t *testing.T) {
 	s := newTestServer(t)
 	s.conf.Users = []*User{
-		{Name: "l3a", Password: testPW("pass1"), Ip: "10.99.0.10", L3: true},
-		{Name: "l3b", Password: testPW("pass2"), Ip: "10.99.0.11", L3: true},
+		{Name: "l3a", Password: testPW("pass1"), Ip: "10.99.0.10", L3: boolP(true)},
+		{Name: "l3b", Password: testPW("pass2"), Ip: "10.99.0.11", L3: boolP(true)},
 	}
 	users, err := newUserStore(s.conf.Users)
 	if err != nil {
@@ -752,8 +752,8 @@ func readRawHead(t *testing.T, c *tls.Conn) string {
 func TestL3RelayMixedOrderCSTPFirst(t *testing.T) {
 	s := newTestServer(t)
 	s.conf.Users = []*User{
-		{Name: "l3a", Password: testPW("pass1"), Ip: "10.99.0.10", L3: true},
-		{Name: "l3b", Password: testPW("pass2"), Ip: "10.99.0.11", L3: true},
+		{Name: "l3a", Password: testPW("pass1"), Ip: "10.99.0.10", L3: boolP(true)},
+		{Name: "l3b", Password: testPW("pass2"), Ip: "10.99.0.11", L3: boolP(true)},
 	}
 	users, err := newUserStore(s.conf.Users)
 	if err != nil {
@@ -835,8 +835,8 @@ func TestL3RelayMixedOrderCSTPFirst(t *testing.T) {
 func TestRelayAfterResumeWithoutDTLS(t *testing.T) {
 	s := newTestServer(t)
 	s.conf.Users = []*User{
-		{Name: "l3a", Password: testPW("pass1"), Ip: "10.99.0.10", L3: true},
-		{Name: "l3b", Password: testPW("pass2"), Ip: "10.99.0.11", L3: true},
+		{Name: "l3a", Password: testPW("pass1"), Ip: "10.99.0.10", L3: boolP(true)},
+		{Name: "l3b", Password: testPW("pass2"), Ip: "10.99.0.11", L3: boolP(true)},
 	}
 	users, err := newUserStore(s.conf.Users)
 	if err != nil {
@@ -929,8 +929,8 @@ func TestRelayAfterResumeWithoutDTLS(t *testing.T) {
 func TestRelayWriterSurvivesStaleSessionTeardown(t *testing.T) {
 	s := newTestServer(t)
 	s.conf.Users = []*User{
-		{Name: "l3a", Password: testPW("pass1"), Ip: "10.99.0.10", L3: true},
-		{Name: "l3b", Password: testPW("pass2"), Ip: "10.99.0.11", L3: true},
+		{Name: "l3a", Password: testPW("pass1"), Ip: "10.99.0.10", L3: boolP(true)},
+		{Name: "l3b", Password: testPW("pass2"), Ip: "10.99.0.11", L3: boolP(true)},
 	}
 	users, err := newUserStore(s.conf.Users)
 	if err != nil {
