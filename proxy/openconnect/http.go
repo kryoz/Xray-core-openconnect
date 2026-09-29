@@ -36,13 +36,13 @@ func readHTTP(br *bufio.Reader) (*httpReq, error) {
 	line, err := br.ReadSlice('\n')
 	if err != nil {
 		if err == bufio.ErrBufferFull {
-			return nil, errors.New("request line too long").AtError()
+			return nil, errors.New("request line too long")
 		}
-		return nil, errors.New("read request line").Base(err).AtError()
+		return nil, errors.New("read request line").Base(err)
 	}
 	f := strings.Fields(strings.TrimRight(string(line), "\r\n"))
 	if len(f) != 3 {
-		return nil, errors.New("bad request line: ", string(line)).AtError()
+		return nil, errors.New("bad request line: ", string(line))
 	}
 	headers := make(map[string]string, 8)
 	var headerBytes int
@@ -50,13 +50,13 @@ func readHTTP(br *bufio.Reader) (*httpReq, error) {
 		line, err := br.ReadSlice('\n')
 		if err != nil {
 			if err == bufio.ErrBufferFull {
-				return nil, errors.New("header line too long").AtError()
+				return nil, errors.New("header line too long")
 			}
-			return nil, errors.New("read headers").Base(err).AtError()
+			return nil, errors.New("read headers").Base(err)
 		}
 		headerBytes += len(line)
 		if headerBytes > maxHeaderLimit {
-			return nil, errors.New("headers too large").AtError()
+			return nil, errors.New("headers too large")
 		}
 		lineStr := strings.TrimRight(string(line), "\r\n")
 		if lineStr == "" {
@@ -69,11 +69,11 @@ func readHTTP(br *bufio.Reader) (*httpReq, error) {
 	if cl := headers["content-length"]; cl != "" {
 		n, err := strconv.Atoi(cl)
 		if err != nil || n < 0 || n > maxBodyLimit {
-			return nil, errors.New("bad content-length: ", cl).AtError()
+			return nil, errors.New("bad content-length: ", cl)
 		}
 		body = make([]byte, n)
 		if _, err := io.ReadFull(br, body); err != nil {
-			return nil, errors.New("read body").Base(err).AtError()
+			return nil, errors.New("read body").Base(err)
 		}
 	}
 	// Split off the query string: openconnect clients may carry a camouflage

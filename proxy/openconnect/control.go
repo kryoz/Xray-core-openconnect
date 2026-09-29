@@ -496,11 +496,11 @@ func readCSTPFrame(tc *tls.Conn, br *bufio.Reader, buf []byte) (byte, []byte, er
 		return 0, nil, err
 	}
 	if string(hdr[:4]) != "STF\x01" || hdr[7] != 0 {
-		return 0, nil, errors.New("malformed CSTP frame header").AtError()
+		return 0, nil, errors.New("malformed CSTP frame header")
 	}
 	n := int(binary.BigEndian.Uint16(hdr[4:6]))
 	if n > len(buf) {
-		return 0, nil, errors.New("oversized CSTP frame: ", n).AtError()
+		return 0, nil, errors.New("oversized CSTP frame: ", n)
 	}
 	if n == 0 {
 		return hdr[6], nil, nil

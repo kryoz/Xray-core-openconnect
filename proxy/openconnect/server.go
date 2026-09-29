@@ -226,13 +226,13 @@ func (s *Server) Start() error {
 		return nil
 	}
 	if s.src.Address.Family().IsDomain() {
-		return errors.New("listen address must be an IP, not a domain").AtError()
+		return errors.New("listen address must be an IP, not a domain")
 	}
 
 	tcpAddr := &net.TCPAddr{IP: s.src.Address.IP(), Port: int(s.src.Port)}
 	tcpLn, err := internet.ListenSystem(s.ctx, tcpAddr, nil)
 	if err != nil {
-		return errors.New("failed to listen on TCP ").Base(err).AtError()
+		return errors.New("failed to listen on TCP ").Base(err)
 	}
 
 	udpPort := int(s.src.Port)
@@ -243,13 +243,13 @@ func (s *Server) Start() error {
 	udpLn, err := internet.ListenSystemPacket(s.ctx, udpAddr, nil)
 	if err != nil {
 		_ = tcpLn.Close()
-		return errors.New("failed to listen on UDP ").Base(err).AtError()
+		return errors.New("failed to listen on UDP ").Base(err)
 	}
 
 	if err := s.stack.Start(); err != nil {
 		_ = tcpLn.Close()
 		_ = udpLn.Close()
-		return errors.New("start gVisor stack ").Base(err).AtError()
+		return errors.New("start gVisor stack ").Base(err)
 	}
 
 	s.tcpLn = tcpLn

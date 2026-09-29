@@ -32,7 +32,7 @@ func newUserStore(users []*User) (*userStore, error) {
 	for _, u := range users {
 		cred, err := parseCredential(u.Password)
 		if err != nil {
-			return nil, errors.New("user ", u.Name, ": ").Base(err).AtError()
+			return nil, errors.New("user ", u.Name, ": ").Base(err)
 		}
 		s.users[u.Name] = &authUser{cred: cred, user: u}
 	}

@@ -20,7 +20,7 @@ func loadCert(ctx context.Context, certFile, keyFile string) (tls.Certificate, e
 	if certFile != "" && keyFile != "" {
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
-			return tls.Certificate{}, errors.New("load TLS cert/key").Base(err).AtError()
+			return tls.Certificate{}, errors.New("load TLS cert/key").Base(err)
 		}
 		return cert, nil
 	}
