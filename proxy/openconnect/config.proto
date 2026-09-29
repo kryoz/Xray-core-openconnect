@@ -23,6 +23,10 @@ message User {
   // between their tunnels, bypassing the L4 stack and routing rules.
   // Pairs without the flag on both sides keep the regular behavior.
   bool l3 = 6;
+  // Per-user DTLS override. Takes precedence over the group's dtls flag:
+  // false forces the CSTP/TCP path, true forces DTLS even when the group
+  // disables it. Unset falls back to the group flag (backwards compatible).
+  optional bool dtls = 7;
 }
 // Group is a named set of split-routing networks shared by users.
 message Group {
