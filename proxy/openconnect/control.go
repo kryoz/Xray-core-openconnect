@@ -246,12 +246,12 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLo
 	}
 	psk, err := kl.pskKey()
 	if err != nil {
-		s.registry.remove(sess)
+		s.registry.remove(s.ctx, sess, "psk derivation failed")
 		_ = writeHTTP(tc, 500, "text/plain", nil, "internal error")
 		return
 	}
 	sess.setPSK(psk)
-	errors.LogInfo(s.ctx, fmt.Sprintf("openconnect: auth OK user=%s ip=%s appID=%s", user, sess.ip, sess.appID))
+	sess.logSessionStart(s.ctx, s.conf.dtlsFor(u))
 
 	// ocserv sets both webvpncontext (new) and webvpn (legacy); libopenconnect
 	// echoes back "webvpn", so we set both to the same SID.
@@ -271,7 +271,7 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq, kl 
 	// Resume: a valid cookie lets the client skip the auth forms. Reject once
 	// the cookie/resume window (cookie_timeout after the last disconnect) has elapsed.
 	if sess.expired(time.Now(), time.Duration(s.cookieTimeoutSecs())*time.Second) {
-		s.registry.remove(sess)
+		s.registry.remove(s.ctx, sess, "cookie/resume window expired")
 		_ = writeHTTP(tc, 401, "text/plain", nil, "unauthorized")
 		return
 	}
@@ -285,7 +285,11 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq, kl 
 	}
 	sess.setPSK(psk)
 	sess.markConnected()
-	errors.LogInfo(s.ctx, fmt.Sprintf("openconnect: CONNECT tunnel ip=%s appID=%s", sess.ip, sess.appID))
+	// Paired with "tunnel closed" from cstpPump: open/close per CSTP
+	// connection, while "session start"/"session end" bracket the whole
+	// cookie lifetime.
+	errors.LogInfo(s.ctx, fmt.Sprintf("openconnect: tunnel open user=%s ip=%s peer=%s appID=%s",
+		sess.userName(), sess.ip, sess.clientIP, sess.appID))
 	// ocserv sends NO body after the blank line; the client reads the rest as
 	// tunnel data. The TCP connection then stays open as the CSTP fallback.
 	_ = writeHTTP(tc, 200, "", s.connectHeaders(sess), "")
@@ -351,6 +355,13 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 		return err
 	}
 
+	// Registered BEFORE the writer-cleanup defer below so it runs after it
+	// (defers are LIFO): by logging time the cleanup has already set
+	// connected=false, so the line reflects the settled state.
+	started := time.Now()
+	closeReason := "client closed CSTP"
+	defer func() { sess.logTunnelClosed(s.ctx, closeReason, started) }()
+
 	// Own the device writer unless DTLS already took it over; when DTLS later
 	// tears down, teardownDTLS falls back to this writer. The token is kept
 	// in sess.dtlsWriter — the single "current registration" slot — so every
@@ -384,6 +395,7 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 	for {
 		select {
 		case <-s.ctx.Done():
+			closeReason = "server shutdown"
 			return
 		default:
 		}
@@ -393,7 +405,8 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 			if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
 				switch idle := time.Since(lastRead); {
 				case idle >= 2*dpd:
-					errors.LogInfo(s.ctx, "openconnect: CSTP DPD timeout for ", sess.ip)
+					closeReason = fmt.Sprintf("DPD timeout (no frame for %s)", idle.Round(time.Second))
+					errors.LogWarning(s.ctx, "openconnect: CSTP DPD timeout for ", sess.ip, " (user ", sess.userName(), ", peer ", sess.clientIP, ")")
 					return
 				case idle >= dpd:
 					_ = writeFrame(acPKTDPDOut, nil)
@@ -403,7 +416,14 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 				continue
 			}
 			if err != io.EOF {
-				errors.LogInfo(s.ctx, "openconnect: CSTP read error for ", sess.ip, ": ", err)
+				closeReason = "read error: " + err.Error()
+				// A read error is the normal consequence of the client's path
+				// going away (NAT rebind, mobile handover, ISP drop) and the
+				// single most useful clue when a client "cannot connect" —
+				// hence Warning, not Info.
+				errors.LogWarning(s.ctx, "openconnect: CSTP read error for ", sess.ip, " (user ", sess.userName(), ", peer ", sess.clientIP, "): ", err)
+			} else {
+				closeReason = "client closed TCP (EOF)"
 			}
 			return
 		}
@@ -454,9 +474,11 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 		case acPKTDPDResp, acPKTKeepalive:
 			// liveness only; lastRead already recorded
 		case acPKTDisconnect, acPKTTerm:
+			closeReason = "client sent CSTP disconnect"
 			return
 		default:
-			errors.LogInfo(s.ctx, "openconnect: unknown CSTP frame type ", typ, " from ", sess.ip)
+			closeReason = fmt.Sprintf("unknown CSTP frame type %d", typ)
+			errors.LogWarning(s.ctx, "openconnect: unknown CSTP frame type ", typ, " from ", sess.ip, " (user ", sess.userName(), ", peer ", sess.clientIP, ")")
 			return
 		}
 	}
@@ -522,7 +544,7 @@ func (s *Server) gcLoop() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			if n := s.registry.sweep(time.Duration(s.cookieTimeoutSecs()) * time.Second); n > 0 {
+			if n := s.registry.sweep(s.ctx, time.Duration(s.cookieTimeoutSecs())*time.Second); n > 0 {
 				errors.LogInfo(s.ctx, fmt.Sprintf("openconnect: gc swept %d expired session(s)", n))
 			}
 		}

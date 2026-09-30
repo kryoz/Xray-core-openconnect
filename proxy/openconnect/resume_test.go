@@ -329,14 +329,14 @@ func TestRegistryRemoveKeepsSuccessor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create fresh: %v", err)
 	}
-	r.remove(old)
+	r.remove(context.Background(), old, "test")
 	if got := r.getByClientIP("1.2.3.4"); got != fresh {
 		t.Fatalf("byClientIP after old remove: want fresh session, got %+v", got)
 	}
 	if got := r.getByAppID("app-new"); got != fresh {
 		t.Fatal("successor byAppID lost")
 	}
-	r.remove(fresh)
+	r.remove(context.Background(), fresh, "test")
 	if got := r.getByClientIP("1.2.3.4"); got != nil {
 		t.Fatal("byClientIP after fresh remove: want nil")
 	}
@@ -358,7 +358,7 @@ func TestRegistryByVirtIP(t *testing.T) {
 	if got := r.getByVirtIP(sess.ip); got == nil || got.user != user {
 		t.Fatalf("getByVirtIP: want alice's session, got %+v", got)
 	}
-	r.remove(sess)
+	r.remove(context.Background(), sess, "test")
 	if got := r.getByVirtIP(sess.ip); got != nil {
 		t.Fatal("getByVirtIP after remove: want nil")
 	}

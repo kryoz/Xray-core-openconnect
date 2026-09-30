@@ -18,7 +18,7 @@ import (
 
 // Dial dials a new TCP connection to the given destination.
 func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (stat.Connection, error) {
-	errors.LogInfo(ctx, "dialing TCP to ", dest)
+	errors.LogDebug(ctx, "dialing TCP to ", dest)
 	var conn net.Conn
 	var err error
 	if streamSettings.FinalMask != nil {

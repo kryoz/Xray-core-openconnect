@@ -202,10 +202,10 @@ func (o *Observer) probe(outbound string) ProbeResult {
 	})
 	if err != nil {
 		errorMessage := "the outbound " + outbound + " is dead: GET request failed:" + err.Error() + "with outbound handler report underlying connection failed"
-		errors.LogInfoInner(o.ctx, errorCollectorForRequest.UnderlyingError(), errorMessage)
+		errors.LogDebugInner(o.ctx, errorCollectorForRequest.UnderlyingError(), errorMessage)
 		return ProbeResult{Alive: false, LastErrorReason: errorMessage}
 	}
-	errors.LogInfo(o.ctx, "the outbound ", outbound, " is alive:", GETTime.Seconds())
+	errors.LogDebug(o.ctx, "the outbound ", outbound, " is alive:", GETTime.Seconds())
 	return ProbeResult{Alive: true, Delay: GETTime.Milliseconds()}
 }
 
@@ -213,11 +213,14 @@ func (o *Observer) updateStatusForResult(outbound string, result *ProbeResult) {
 	o.statusLock.Lock()
 	defer o.statusLock.Unlock()
 	var status *OutboundStatus
+	first, wasAlive := false, false
 	if location := o.findStatusLocationLockHolderOnly(outbound); location != -1 {
 		status = o.status[location]
+		wasAlive = status.Alive
 	} else {
 		status = &OutboundStatus{}
 		o.status = append(o.status, status)
+		first = true
 	}
 
 	status.LastTryTime = time.Now().Unix()
@@ -232,6 +235,20 @@ func (o *Observer) updateStatusForResult(outbound string, result *ProbeResult) {
 		status.LastErrorReason = result.LastErrorReason
 		status.Delay = 99999999
 		status.FailStreak++
+	}
+
+	// Log the state transition only, not every probe: with a 10 s interval and
+	// three outbounds the per-probe "is alive" line alone produced ~26k
+	// journal lines/day and pushed everything else out of the journald window
+	// (networp gate, 2026-09-30). Per-probe detail stays at debug level and in
+	// the exported xray_observatory_* metrics; what an operator needs in the
+	// log is when an egress leg flips.
+	if first || wasAlive != status.Alive {
+		if status.Alive {
+			errors.LogInfo(o.ctx, "the outbound ", outbound, " is alive (delay ", status.Delay, "ms)")
+		} else {
+			errors.LogInfo(o.ctx, "the outbound ", outbound, " is dead (failStreak ", status.FailStreak, "): ", status.LastErrorReason)
+		}
 	}
 }
 

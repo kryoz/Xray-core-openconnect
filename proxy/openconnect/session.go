@@ -1,8 +1,10 @@
 package openconnect
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"net/netip"
 	"strconv"
@@ -27,6 +29,10 @@ type ocSession struct {
 	created  time.Time
 	clientIP string // client's real source IP, primary key for UDP demux
 
+	// endOnce guards the single "session end" line: both registry.remove and
+	// the GC sweep can reap the same session.
+	endOnce sync.Once
+
 	mu        sync.Mutex
 	connected bool
 	lastDisc  time.Time // last tunnel disconnect; drives cookie/resume TTL
@@ -44,6 +50,75 @@ type ocSession struct {
 	// owns the slot (two sessions of one user may share a static virtual IP).
 	// Guarded by mu.
 	dtlsWriter *ocWriter
+}
+
+// userName returns the session's user name, or "-" for an anonymous session.
+func (s *ocSession) userName() string {
+	if s.user == nil {
+		return "-"
+	}
+	return s.user.Name
+}
+
+// sessionStartLine renders the session-start record. Pure so the field set is
+// pinned by a test: these lines are grepped during incidents.
+func (s *ocSession) sessionStartLine(dtls bool) string {
+	static := s.user != nil && s.user.Ip != ""
+	group := "-"
+	if s.user != nil && s.user.Group != "" {
+		group = s.user.Group
+	}
+	return fmt.Sprintf("openconnect: session start user=%s ip=%s peer=%s group=%s static=%t l3=%t dtls=%t appID=%s",
+		s.userName(), s.ip, s.clientIP, group, static, s.l3, dtls, s.appID)
+}
+
+// tunnelClosedLine renders the end of one CSTP/TCP tunnel. now is a parameter
+// so tests get deterministic durations.
+func (s *ocSession) tunnelClosedLine(reason string, started, now time.Time) string {
+	return fmt.Sprintf("openconnect: tunnel closed user=%s ip=%s peer=%s tunnel=%s session=%s reason=%s",
+		s.userName(), s.ip, s.clientIP,
+		now.Sub(started).Round(time.Second), now.Sub(s.created).Round(time.Second), reason)
+}
+
+// sessionEndLine renders the final end of a session.
+func (s *ocSession) sessionEndLine(reason string, now time.Time) string {
+	static := s.user != nil && s.user.Ip != ""
+	return fmt.Sprintf("openconnect: session end user=%s ip=%s peer=%s duration=%s static=%t reason=%s",
+		s.userName(), s.ip, s.clientIP, now.Sub(s.created).Round(time.Second), static, reason)
+}
+
+// logSessionStart reports the creation of a session (cookie lifetime), for
+// every user — static-IP clients included: the address is pinned by config, so
+// the old "CONNECT tunnel ip=..." line alone did not tell an operator which
+// user it belonged to or from which WAN address the client came.
+func (s *ocSession) logSessionStart(ctx context.Context, dtls bool) {
+	errors.LogInfo(ctx, s.sessionStartLine(dtls))
+}
+
+// logTunnelClosed reports the end of one CSTP/TCP tunnel. A session can see
+// this several times (a resume re-runs cstpPump), so this — not the session
+// end — is what usually says "the client dropped at HH:MM:SS and why".
+func (s *ocSession) logTunnelClosed(ctx context.Context, reason string, started time.Time) {
+	errors.LogInfo(ctx, s.tunnelClosedLine(reason, started, time.Now()))
+}
+
+// markEnded reports whether this call is the one that closes the session
+// record: registry.remove and the GC sweep can both reach the same session,
+// and a doubled "session end" line would read like two sessions.
+func (s *ocSession) markEnded() bool {
+	fired := false
+	s.endOnce.Do(func() { fired = true })
+	return fired
+}
+
+// logSessionEnd reports the final end of a session: its cookie/resume window
+// elapsed, or it was dropped before the client ever connected. Fires once
+// (sync.Once) because both registry.remove and the GC sweep can reach it.
+func (s *ocSession) logSessionEnd(ctx context.Context, reason string) {
+	if !s.markEnded() {
+		return
+	}
+	errors.LogInfo(ctx, s.sessionEndLine(reason, time.Now()))
 }
 
 // setPSK stores the derived DTLS PSK for this session. Guarded by s.mu: the
@@ -190,7 +265,7 @@ func (r *sessionRegistry) count() int {
 // remove drops a session and releases its dynamic IP. Secondary indexes are
 // conditional: two sessions may share a static virtual IP or a NAT client IP,
 // and removing the older one must not clobber the successor's entries.
-func (r *sessionRegistry) remove(sess *ocSession) {
+func (r *sessionRegistry) remove(ctx context.Context, sess *ocSession, reason string) {
 	r.mu.Lock()
 	delete(r.bySID, sess.sid)
 	if r.byAppID[sess.appID] == sess {
@@ -206,11 +281,12 @@ func (r *sessionRegistry) remove(sess *ocSession) {
 	if sess.user.Ip == "" {
 		r.pool.release(sess.ip)
 	}
+	sess.logSessionEnd(ctx, reason)
 }
 
 // sweep removes disconnected sessions whose resume window has elapsed, freeing
 // their dynamic IPs. Connected sessions are left alone.
-func (r *sessionRegistry) sweep(cookieTimeout time.Duration) int {
+func (r *sessionRegistry) sweep(ctx context.Context, cookieTimeout time.Duration) int {
 	now := time.Now()
 	r.mu.Lock()
 	var dead []*ocSession
@@ -234,6 +310,7 @@ func (r *sessionRegistry) sweep(cookieTimeout time.Duration) int {
 		if sess.user.Ip == "" {
 			r.pool.release(sess.ip)
 		}
+		sess.logSessionEnd(ctx, "cookie/resume window expired")
 	}
 	return len(dead)
 }
