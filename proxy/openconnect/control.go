@@ -136,6 +136,9 @@ func (s *Server) handleControl(raw net.Conn) {
 			if s.sessFromCookie(req.headers["cookie"]) != nil || req.query == s.conf.CamouflageSecret {
 				camoOK = true
 			} else {
+				// The secret is a credential too: feed the same limiter as /auth,
+				// else it stays an unlimited brute-force hole next to a limited one.
+				s.noteAuthFailure(peerIP)
 				errors.LogInfo(s.ctx, fmt.Sprintf("openconnect: camouflage: secret not found in URL from %s, declining", peerIP))
 				s.rejectCamouflage(tc)
 				return
@@ -192,6 +195,7 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLo
 		// User names are short by construction; reject pathologically long
 		// ones outright instead of carrying them around.
 		if len(user) > 255 {
+			s.noteAuthFailure(peerIP)
 			_ = writeHTTP(tc, 401, "text/xml; charset=utf-8", nil, failMsg)
 			return
 		}
@@ -216,8 +220,14 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLo
 		return
 	}
 
-	if user == "" || !s.users.check(user, pw) {
-		s.limiter.recordFailure(peerIP)
+	if user == "" {
+		// Password arrived without a staged username on this connection: a
+		// broken client flow, not a wrong credential — don't burn a strike.
+		_ = writeHTTP(tc, 200, "text/xml; charset=utf-8", nil, loginForm)
+		return
+	}
+	if !s.users.check(user, pw) {
+		s.noteAuthFailure(peerIP)
 		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: auth failed for %q from %s", user, peerIP))
 		_ = writeHTTP(tc, 401, "text/xml; charset=utf-8", nil, failMsg)
 		return
@@ -297,10 +307,11 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq, kl 
 }
 
 // stfBatch packs several [acPKTData]+IP frames into one CSTP/TCP buffer, each
-// as an "STF\x1"+len+type frame, so a single tls.Conn.Write carries several
-// DATA packets: one TLS record and one write syscall instead of one per
-// packet. readCSTPFrame is stream-oriented (length-prefixed), so the peer
-// decodes them in order.
+// as an "STF\x1"+len+type frame. Safe ONLY when given a single frame: the
+// openconnect client (cstp.c cstp_mainloop) does one SSL_read and requires
+// len == 8 + payload_len, so several frames in one TLS record produce
+// "Unexpected packet length". The delegating qdisc feeds one packet per
+// WritePackets, keeping this a single-frame path; do not add a batching qdisc.
 func stfBatch(frames [][]byte) []byte {
 	total := 0
 	for _, f := range frames {

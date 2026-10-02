@@ -1,6 +1,8 @@
 package openconnect
 
 import (
+	"fmt"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -91,7 +93,9 @@ func (l *authLimiter) blocked(ip string) bool {
 	return f.count >= authFailMax
 }
 
-func (l *authLimiter) recordFailure(ip string) {
+// recordFailure records one failed attempt for ip and reports whether the ip
+// just crossed into the blocked state.
+func (l *authLimiter) recordFailure(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
@@ -99,16 +103,19 @@ func (l *authLimiter) recordFailure(ip string) {
 	if !ok || now.Sub(f.first) > authFailWindow {
 		l.attempts[ip] = &failCount{count: 1, first: now}
 		l.sweepLocked(now)
-		return
+		return false
 	}
 	f.count++
 	l.sweepLocked(now)
+	return f.count == authFailMax
 }
 
 // sweepLocked lazily reaps expired entries once the map grows past the
-// threshold, bounding memory under sustained attack. Caller holds l.mu.
+// threshold, bounding memory under sustained attack. It runs on 1 of 16
+// calls: scanning the whole map on every recordFailure would be O(n^2)
+// under a mass attack. Caller holds l.mu.
 func (l *authLimiter) sweepLocked(now time.Time) {
-	if len(l.attempts) < authFailSweepThreshold {
+	if len(l.attempts) < authFailSweepThreshold || rand.IntN(16) != 0 {
 		return
 	}
 	for ip, f := range l.attempts {
@@ -122,4 +129,12 @@ func (l *authLimiter) reset(ip string) {
 	l.mu.Lock()
 	delete(l.attempts, ip)
 	l.mu.Unlock()
+}
+
+// noteAuthFailure records a failed attempt for peerIP and logs the moment the
+// IP crosses into the blocked state.
+func (s *Server) noteAuthFailure(peerIP string) {
+	if s.limiter.recordFailure(peerIP) {
+		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: auth limiter: %s blocked for %v after %d failed attempts", peerIP, authFailWindow, authFailMax))
+	}
 }

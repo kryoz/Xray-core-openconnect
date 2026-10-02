@@ -635,6 +635,12 @@ func createOCStack(ep stack.LinkEndpoint) (*stack.Stack, error) {
 	}
 	gStack := stack.New(opts)
 
+	// Keep the default delegating qdisc (one packet per WritePackets call).
+	// CSTP frames MUST NOT be coalesced into one TLS record: the openconnect
+	// client (cstp.c cstp_mainloop) reads one record at a time and requires
+	// len == 8 + payload_len for the first frame, so a batching qdisc here
+	// makes WritePackets emit several frames per tls.Conn.Write and the client
+	// errors with "Unexpected packet length" / collapses throughput.
 	if err := gStack.CreateNIC(ocNIC, ep); err != nil {
 		return nil, errors.New(err.String())
 	}
