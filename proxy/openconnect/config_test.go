@@ -76,9 +76,11 @@ func validConfig(t *testing.T) *OpenConnectInboundConfig {
 }
 
 // The MTU math that fixed the 2026-09-27 pps anomaly: both tunnel MTUs
-// (advertised X-CSTP-MTU and gVisor NIC) must be base−cstpOverhead, so a
-// maximal IP packet is a datagram of exactly the base MTU and both sides'
-// MSS values line up (client MSS = X-CSTP-MTU−40).
+// (advertised X-CSTP-MTU and gVisor NIC) are base−cstpOverhead, and
+// cstpOverhead must cover the whole outer header stack, so a maximal inner IP
+// packet leaves as a datagram of at most the base MTU — no outer
+// fragmentation. Pinned against the wire format, not against the constant:
+// comparing dataMTUOf with cstpOverhead alone cannot catch a wrong constant.
 func TestMTUMath(t *testing.T) {
 	base := uint32(1500)
 	if got := dataMTUOf(base); got != base-cstpOverhead {
@@ -87,10 +89,22 @@ func TestMTUMath(t *testing.T) {
 	if got := dataMTUOf(cstpOverhead - 1); got != cstpOverhead-1 {
 		t.Errorf("dataMTUOf below overhead should pass through, got %d", got)
 	}
-	// Client MSS (X-CSTP-MTU−40) must reach a typical incoming segment size
-	// (~1380 from a 1420-MTU wg path): 1500−78−40 = 1382.
-	if mss := int(base - cstpOverhead - 40); mss < 1380 {
-		t.Errorf("client MSS %d below 1380: sub-MSS segments would split", mss)
+	// Outer datagram of a maximal inner packet: the 8-byte STF header (see
+	// writeFrame) + a TLS 1.2 AEAD record (5 + 16 IV + 16 tag) + TCP + IPv4.
+	// Anything above the base MTU fragments on the wire and re-creates the
+	// ~1.4x pps anomaly.
+	outer := int(dataMTUOf(base)) + 8 + 5 + 16 + 16 + 20 + 20
+	if outer > int(base) {
+		t.Errorf("outer datagram %d exceeds base MTU %d: every bulk segment fragments", outer, base)
+	}
+	// Consequence of the pessimistic (TLS 1.2) overhead: the client MSS is
+	// 1375, so an incoming 1380-byte segment from a 1420-MTU path splits once
+	// inside the tunnel; under TLS 1.3 (overhead 70) the MSS is 1390 and it
+	// does not. No-outer-fragmentation wins: an inner split costs one extra
+	// frame, an outer fragment costs reassembly on every hop. The bound only
+	// guards against the overhead growing past its correct value.
+	if mss := int(base - cstpOverhead - 40); mss < 1375 {
+		t.Errorf("client MSS %d below 1375: cstpOverhead is larger than the wire format requires", mss)
 	}
 }
 

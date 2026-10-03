@@ -121,10 +121,17 @@ func (d *ocDevice) ReadPacket() (byte, *stack.PacketBuffer, error) {
 		case <-d.closed:
 			return 0, nil, io.EOF
 		case p := <-d.rxCh:
+			payload := p.frame[1:]
+			// The tunnel is IPv4-only: the address pool, X-CSTP-Address/Netmask
+			// and the split routes are IPv4, and the stack registers no v6
+			// protocol. Drop a non-IPv4 packet here rather than building a
+			// PacketBuffer for it and counting its bytes as uplink traffic.
+			if len(payload) < header.IPv4MinimumSize || payload[0]>>4 != 4 {
+				continue
+			}
 			if d.relayL3(p) {
 				continue
 			}
-			payload := p.frame[1:]
 			if d.uplinkCounter != nil {
 				d.uplinkCounter.Add(int64(len(payload)))
 			}
@@ -132,7 +139,7 @@ func (d *ocDevice) ReadPacket() (byte, *stack.PacketBuffer, error) {
 				ReserveHeaderBytes: header.IPv4MinimumSize,
 				Payload:            buffer.MakeWithData(payload),
 			})
-			return payload[0] >> 4, pb, nil
+			return 4, pb, nil
 		}
 	}
 }
@@ -367,8 +374,9 @@ func (e *ocLinkEndpoint) dispatchLoop(ctx context.Context, dispatcher stack.Netw
 			e.Attach(nil)
 			return
 		}
-		// The tunnel is IPv4-only: anything else is dropped here instead of
-		// being built into a PacketBuffer for a stack that has no v6 protocol.
+		// Defensive: ReadPacket already drops non-IPv4 before it builds the
+		// PacketBuffer, so the protocol number below is always IPv4. The check
+		// stays because it is what makes that invariant local.
 		if version != 4 {
 			packet.DecRef()
 			continue

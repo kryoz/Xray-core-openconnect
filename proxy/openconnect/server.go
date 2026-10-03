@@ -33,10 +33,11 @@ type Server struct {
 	src     net.Destination
 	baseMTU uint32
 
-	cert     tls.Certificate
-	registry *sessionRegistry
-	users    *userStore
-	limiter  *authLimiter
+	cert        tls.Certificate
+	registry    *sessionRegistry
+	users       *userStore
+	limiter     *authLimiter
+	camoLimiter *authLimiter
 
 	stack  *ocStack
 	device *ocDevice
@@ -138,10 +139,11 @@ func NewServer(ctx context.Context, conf *OpenConnectInboundConfig) (*Server, er
 		tag:           inbound.Tag,
 		src:           inbound.Source,
 
-		cert:     cert,
-		registry: registry,
-		users:    users,
-		limiter:  newAuthLimiter(),
+		cert:        cert,
+		registry:    registry,
+		users:       users,
+		limiter:     newAuthLimiter(authFailMax),
+		camoLimiter: newAuthLimiter(camoFailMax),
 
 		stack:   stack,
 		device:  stack.device,

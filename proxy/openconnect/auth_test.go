@@ -7,7 +7,7 @@ import (
 )
 
 func TestAuthLimiterBlocksAfterMaxFailures(t *testing.T) {
-	l := newAuthLimiter()
+	l := newAuthLimiter(authFailMax)
 	for i := 0; i < authFailMax-1; i++ {
 		if l.recordFailure("1.2.3.4") {
 			t.Fatalf("attempt %d reported block before threshold", i+1)
@@ -26,7 +26,7 @@ func TestAuthLimiterBlocksAfterMaxFailures(t *testing.T) {
 }
 
 func TestAuthLimiterWindowExpiry(t *testing.T) {
-	l := newAuthLimiter()
+	l := newAuthLimiter(authFailMax)
 	for i := 0; i < authFailMax; i++ {
 		l.recordFailure("1.2.3.4")
 	}
@@ -39,7 +39,7 @@ func TestAuthLimiterWindowExpiry(t *testing.T) {
 }
 
 func TestAuthLimiterSweepReapsStaleEntries(t *testing.T) {
-	l := newAuthLimiter()
+	l := newAuthLimiter(authFailMax)
 	stale := time.Now().Add(-authFailWindow - time.Second)
 	l.mu.Lock()
 	for i := 0; i < authFailSweepThreshold+10; i++ {
@@ -56,5 +56,29 @@ func TestAuthLimiterSweepReapsStaleEntries(t *testing.T) {
 	l.mu.Unlock()
 	if n > authFailSweepThreshold {
 		t.Fatalf("sweep did not reap stale entries: %d remain", n)
+	}
+}
+
+// TestLimiterBudgetsAreIndependent pins the split between the /auth limiter and
+// the camouflage one: ordinary browser misses on the decor URL must never
+// consume the auth budget, or every VPN user behind a shared NAT address is
+// locked out for the whole window.
+func TestLimiterBudgetsAreIndependent(t *testing.T) {
+	auth := newAuthLimiter(authFailMax)
+	camo := newAuthLimiter(camoFailMax)
+	for i := 0; i < authFailMax; i++ {
+		camo.recordFailure("10.0.0.1")
+	}
+	if camo.blocked("10.0.0.1") {
+		t.Fatal("camouflage blocked at the auth threshold")
+	}
+	for i := 0; i < camoFailMax; i++ {
+		camo.recordFailure("10.0.0.1")
+	}
+	if !camo.blocked("10.0.0.1") {
+		t.Fatalf("camouflage not blocked after %d misses", camoFailMax)
+	}
+	if auth.blocked("10.0.0.1") {
+		t.Fatal("auth budget consumed by camouflage misses")
 	}
 }

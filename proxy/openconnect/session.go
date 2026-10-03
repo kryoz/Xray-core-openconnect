@@ -191,6 +191,9 @@ type sessionRegistry struct {
 	// anyL3 is set once any L3 user registers; relayL3 checks it first so
 	// non-L3 deployments pay one atomic load per packet instead of the
 	// destination-IP parse plus registry lookup.
+	// ponytail: sticky — set on the first L3 session and never cleared when the
+	// last one leaves, so a deployment that once had an L3 user keeps paying
+	// the destination parse. Upgrade when L3 can be turned off at runtime.
 	anyL3 atomic.Bool
 }
 
@@ -282,33 +285,60 @@ func (r *sessionRegistry) countConnected() int {
 // are touched, so a second connected device is never affected; a second idle
 // device loses its resume cookie and authenticates again.
 func (r *sessionRegistry) supersedeStale(ctx context.Context, user string) int {
-	r.mu.RLock()
+	// Scan and unregister under one write lock: with a read lock and a separate
+	// remove, a session that got its CONNECT in between was dropped while its
+	// tunnel was still live — out of both indexes, invisible to the sweep and
+	// the L3 relay, and with its IP back in the pool for another client.
+	r.mu.Lock()
 	var stale []*ocSession
 	for _, sess := range r.bySID {
 		if sess.userName() == user && !sess.isConnected() {
+			r.retireLocked(sess)
 			stale = append(stale, sess)
 		}
 	}
-	r.mu.RUnlock()
+	r.mu.Unlock()
 	for _, sess := range stale {
-		r.remove(ctx, sess, "superseded by re-auth for the same user")
+		r.releaseLease(sess)
+		sess.logSessionEnd(ctx, "superseded by re-auth for the same user")
 	}
 	return len(stale)
 }
 
-// remove drops a session and releases its dynamic IP. The virtual-IP index is
+// retireLocked drops a session from both indexes. The virtual-IP index is
 // updated conditionally: two sessions of one user may share a static virtual
 // IP, and removing the older one must not clobber the successor's entry.
-func (r *sessionRegistry) remove(ctx context.Context, sess *ocSession, reason string) {
-	r.mu.Lock()
+// Caller holds r.mu for writing.
+func (r *sessionRegistry) retireLocked(sess *ocSession) {
 	delete(r.bySID, sess.sid)
 	if r.byVirtIP[sess.ip] == sess {
 		delete(r.byVirtIP, sess.ip)
 	}
-	r.mu.Unlock()
+}
+
+// releaseLease returns a session's dynamic IP to the pool; a static-IP user
+// holds no lease. It must run exactly once per session: remove, sweep and
+// supersedeStale all reach the same session, and a second release would
+// un-allocate an address that a new session has just been handed.
+func (r *sessionRegistry) releaseLease(sess *ocSession) {
 	if sess.user.Ip == "" {
 		r.pool.release(sess.ip)
 	}
+}
+
+// remove drops a session and releases its dynamic IP. A session already reaped
+// by the sweep or by a supersede is not released a second time.
+func (r *sessionRegistry) remove(ctx context.Context, sess *ocSession, reason string) {
+	r.mu.Lock()
+	known := r.bySID[sess.sid] == sess
+	if known {
+		r.retireLocked(sess)
+	}
+	r.mu.Unlock()
+	if !known {
+		return
+	}
+	r.releaseLease(sess)
 	sess.logSessionEnd(ctx, reason)
 }
 
@@ -318,20 +348,15 @@ func (r *sessionRegistry) sweep(ctx context.Context, cookieTimeout time.Duration
 	now := time.Now()
 	r.mu.Lock()
 	var dead []*ocSession
-	for sid, sess := range r.bySID {
+	for _, sess := range r.bySID {
 		if sess.expired(now, cookieTimeout) {
+			r.retireLocked(sess)
 			dead = append(dead, sess)
-			delete(r.bySID, sid)
-			if r.byVirtIP[sess.ip] == sess {
-				delete(r.byVirtIP, sess.ip)
-			}
 		}
 	}
 	r.mu.Unlock()
 	for _, sess := range dead {
-		if sess.user.Ip == "" {
-			r.pool.release(sess.ip)
-		}
+		r.releaseLease(sess)
 		sess.logSessionEnd(ctx, "cookie/resume window expired")
 	}
 	return len(dead)

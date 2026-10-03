@@ -22,21 +22,25 @@ const (
 	// authTimeout bounds how long a control connection may idle during auth.
 	authTimeout = 240 * time.Second
 	// cstpOverhead is the wire cost of one CSTP frame over the TLS control
-	// channel, taken at its worst case: 1 CSTP type byte + 5 TLS record
-	// header + 16 IV + 16 AEAD tag + 20 TCP + 20 IPv4. TLS 1.2 AEAD carries
-	// an explicit 16-byte IV, TLS 1.3 does not (62 there), and the control
-	// channel accepts either — so the constant is deliberately the pessimistic
-	// one: both the advertised X-CSTP-MTU and the gVisor NIC MTU are
-	// baseMTU - cstpOverhead, so a maximal IP packet in either direction is a
-	// datagram of at most the base MTU on any allowed TLS version: no outer
-	// fragmentation, and the client-side MSS (X-CSTP-MTU - 40) lines up with
-	// the server-side one — sub-MSS incoming segments no longer split into
-	// two datagrams each (the ~1.4x pps anomaly of the 2026-09-27 report).
+	// channel, taken at its worst case: the 8-byte STF header ("STF" + 0x01 +
+	// length + type + reserved, see writeFrame) + 5 TLS record header + 16 IV
+	// + 16 AEAD tag + 20 TCP + 20 IPv4. TLS 1.2 AEAD carries an explicit
+	// 16-byte IV; TLS 1.3 does not (70 there — its content type byte moves
+	// inside the encrypted payload), and the control channel accepts either, so
+	// the constant is deliberately the pessimistic one: both the advertised
+	// X-CSTP-MTU and the gVisor NIC MTU are baseMTU - cstpOverhead, so a
+	// maximal IP packet in either direction is a datagram of at most the base
+	// MTU on any allowed TLS version: no outer fragmentation. The client-side
+	// MSS (X-CSTP-MTU - 40) then lines up with the server-side one — sub-MSS
+	// incoming segments no longer split into two datagrams each (the ~1.4x pps
+	// anomaly of the 2026-09-27 report). Counting only the CSTP type byte
+	// (78) leaves the outer datagram 7 bytes over the base MTU and puts that
+	// anomaly back.
 	// The value is per-server, not per-session: the gVisor NIC MTU is one value
 	// for the whole shared stack, and X-CSTP-MTU has to match the server-side
 	// inner MSS. Adapting it to the negotiated TLS version would need a
 	// per-client NIC, which costs more than the 16 bytes it saves.
-	cstpOverhead = 78
+	cstpOverhead = 85
 
 	// OpenConnect CSTP data-packet types (ocserv src/vpn.h).
 	acPKTData       = 0 // AC_PKT_DATA: raw IP payload
@@ -129,9 +133,16 @@ func (s *Server) handleControl(raw net.Conn) {
 			if s.sessFromCookie(req.headers["cookie"]) != nil || req.query == s.conf.CamouflageSecret {
 				camoOK = true
 			} else {
-				// The secret is a credential too: feed the same limiter as /auth,
-				// else it stays an unlimited brute-force hole next to a limited one.
-				s.noteAuthFailure(peerIP)
+				// The secret is a credential too, so it needs a limiter — but not
+				// the /auth one. The camouflage URL is browsed by ordinary
+				// browsers behind shared NATs, and five decor misses must not
+				// lock the VPN out for every user behind that address. Past its
+				// own budget the IP stops being answered at all: a brute-forcer
+				// then pays a fresh handshake for nothing.
+				s.noteCamouflageFailure(peerIP)
+				if s.camoLimiter.blocked(peerIP) {
+					return
+				}
 				errors.LogInfo(s.ctx, fmt.Sprintf("openconnect: camouflage: secret not found in URL from %s, declining", peerIP))
 				s.rejectCamouflage(tc)
 				return
@@ -227,20 +238,24 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, pending *
 	}
 	s.limiter.reset(peerIP)
 
+	// max_clients bounds live tunnels, not session records: a session inside its
+	// resume window without a tunnel holds an IP lease, not a client slot.
+	// Checked before the stale-session sweep below: a rejected client must not
+	// pay for the rejection by losing the session it could still resume into
+	// once a slot frees. The user's own disconnected sessions are not counted
+	// here, so the order does not change whether the limit bites.
+	if s.conf.MaxClients > 0 && s.registry.countConnected() >= int(s.conf.MaxClients) {
+		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: max clients reached, rejecting %s", peerIP))
+		_ = writeHTTP(tc, 503, "text/plain", nil, "too many clients")
+		return
+	}
+
 	// A cookie-less re-auth (app restart, VPN toggle, lost cookie, changed
 	// source address) must not leave the previous session behind: every attempt
 	// would hold a dynamic IP for the whole cookie window. Keyed by user, not
 	// by peer address — behind a NAT one address is several users, and a mobile
 	// client changes it on every attempt.
 	s.registry.supersedeStale(s.ctx, user)
-
-	// max_clients bounds live tunnels, not session records: a session inside its
-	// resume window without a tunnel holds an IP lease, not a client slot.
-	if s.conf.MaxClients > 0 && s.registry.countConnected() >= int(s.conf.MaxClients) {
-		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: max clients reached, rejecting %s", peerIP))
-		_ = writeHTTP(tc, 503, "text/plain", nil, "too many clients")
-		return
-	}
 
 	u := s.users.userByName(user)
 	sess, err := s.registry.create(peerIP, u, s.conf.l3For(u))
@@ -479,9 +494,16 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader, multi
 	sess.writer = myWriter
 	sess.mu.Unlock()
 	defer func() {
+		// Release by token, unconditionally: unregisterIf compares identity
+		// inside the device map, so this can never steal a successor's slot.
+		// Guarding the call with sess.writer was wrong — when two CONNECTs
+		// race, the superseded pump can clear sess.writer after the successor
+		// set it, and then the successor's token is never removed from
+		// ocDevice.tunnels and keeps receiving downlink packets after its
+		// tunnel is gone.
+		s.device.unregisterIf(sess.ip, myWriter)
 		sess.mu.Lock()
 		if sess.writer == myWriter {
-			s.device.unregisterIf(sess.ip, myWriter)
 			sess.writer = nil
 		}
 		sess.mu.Unlock()
@@ -640,7 +662,7 @@ func (s *Server) connectHeaders(sess *ocSession) map[string][]string {
 		"X-CSTP-Address":    {sess.ip.String()},
 		"X-CSTP-Netmask":    {s.registry.pool.netmask()},
 		"X-CSTP-Base-MTU":   {strconv.FormatUint(uint64(baseMTU), 10)},
-		"X-CSTP-MTU":        {strconv.FormatUint(uint64(baseMTU-cstpOverhead), 10)},
+		"X-CSTP-MTU":        {strconv.FormatUint(uint64(dataMTUOf(baseMTU)), 10)},
 		"X-CSTP-Keepalive":  {strconv.Itoa(cstpKeepalive)},
 		"X-CSTP-DPD":        {strconv.FormatUint(uint64(dpd), 10)},
 		"X-CSTP-Rekey-Time": {"0"},

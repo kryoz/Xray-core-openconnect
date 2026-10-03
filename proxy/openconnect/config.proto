@@ -25,6 +25,10 @@ message User {
   // default off), true forces relay on, false forces it off. Pairs without
   // l3 on both sides keep the regular behavior.
   optional bool l3 = 6;
+  // dtls (7) was the per-user DTLS override, removed with the DTLS data
+  // channel. Reserved so a future field cannot take the number and silently
+  // mis-decode an old config.
+  reserved 7;
 }
 // Group is a named set of split-routing networks shared by users.
 message Group {
@@ -39,6 +43,8 @@ message Group {
   // L3 client-to-client reachability for this group's users. Unset = false
   // (opt-in). A user's own l3 flag overrides the group.
   optional bool l3 = 5;
+  // dtls (3) was the group DTLS offer, removed with the DTLS data channel.
+  reserved 3;
 }
 
 message OpenConnectInboundConfig {
@@ -56,6 +62,8 @@ message OpenConnectInboundConfig {
   string cert_file = 7;
   string key_file = 8;
   uint32 max_clients = 9;
+  // dtls_port (10) and cipher (15) belonged to the removed DTLS data channel.
+  reserved 10, 15;
   // Split-routing networks (IPv4 CIDR) advertised to the client as
   // X-CSTP-Split-Include. When set, the client routes only these networks
   // through the tunnel instead of pulling its default route.

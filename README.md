@@ -34,7 +34,7 @@ This fork adds an **OpenConnect / Cisco AnyConnect inbound** — a drop-in, ocse
 - **Multi-frame downlink coalescing** — several CSTP frames in one TLS write, negotiated by the `X-CSTP-Multi-Frame-Capability` header. This is a fork extension, not an ocserv option: only clients built against this fork send it, stock openconnect keeps one frame per TLS record
 - **ocserv parity** — camouflage (`camouflageSecret` / `camouflageRealm`, byte-compatible 401/404), MTU 1500, per-user and per-group split routing (`X-CSTP-Split-Include` / `X-CSTP-Split-Exclude`)
 - **Addressing is IPv4-only** — the virtual IP pool, `X-CSTP-Address` / `X-CSTP-Netmask` and the split routes are IPv4; the tunnel carries no IPv6
-- Virtual IP pool, DPD/keepalive, MTU discovery, per-user traffic stats, client-to-client L3 relay. `maxClients` bounds live tunnels, not session records: a client inside its resume window holds an address, not a slot
+- Virtual IP pool, DPD/keepalive, MTU discovery, per-user traffic stats, client-to-client L3 relay. `maxClients` bounds live tunnels, not session records: a client inside its resume window holds an address, not a slot. It is enforced at authentication: a client that still holds a valid cookie resumes without re-checking it
 
 Also in this fork:
 

@@ -12,6 +12,12 @@ import (
 const (
 	authFailMax    = 5
 	authFailWindow = 5 * time.Minute
+	// camoFailMax bounds camouflage misses per IP on its own counter. The
+	// camouflage URL is browsed by ordinary browsers behind shared NATs, so
+	// sharing the /auth threshold with it would let five decor requests lock
+	// the VPN out for every user behind that address. The secret is still a
+	// credential, so it keeps a limiter — just one sized for browsing.
+	camoFailMax = 50
 	// authFailSweepThreshold triggers a lazy sweep of stale attempts so the
 	// limiter map cannot grow without bound from one-shot attacking IPs.
 	authFailSweepThreshold = 1024
@@ -65,7 +71,11 @@ func (s *userStore) userByName(name string) *User {
 }
 
 // authLimiter blocks an IP after too many failed authentications in a window.
+// max is per-instance: /auth and the camouflage check share the mechanism but
+// not the budget (see camoFailMax).
 type authLimiter struct {
+	max int
+
 	mu       sync.Mutex
 	attempts map[string]*failCount
 }
@@ -75,8 +85,8 @@ type failCount struct {
 	first time.Time
 }
 
-func newAuthLimiter() *authLimiter {
-	return &authLimiter{attempts: make(map[string]*failCount)}
+func newAuthLimiter(max int) *authLimiter {
+	return &authLimiter{max: max, attempts: make(map[string]*failCount)}
 }
 
 func (l *authLimiter) blocked(ip string) bool {
@@ -90,7 +100,7 @@ func (l *authLimiter) blocked(ip string) bool {
 		delete(l.attempts, ip)
 		return false
 	}
-	return f.count >= authFailMax
+	return f.count >= l.max
 }
 
 // recordFailure records one failed attempt for ip and reports whether the ip
@@ -107,7 +117,7 @@ func (l *authLimiter) recordFailure(ip string) bool {
 	}
 	f.count++
 	l.sweepLocked(now)
-	return f.count == authFailMax
+	return f.count == l.max
 }
 
 // sweepLocked lazily reaps expired entries once the map grows past the
@@ -135,6 +145,16 @@ func (l *authLimiter) reset(ip string) {
 // IP crosses into the blocked state.
 func (s *Server) noteAuthFailure(peerIP string) {
 	if s.limiter.recordFailure(peerIP) {
-		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: auth limiter: %s blocked for %v after %d failed attempts", peerIP, authFailWindow, authFailMax))
+		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: auth limiter: %s blocked for %v after %d failed attempts", peerIP, authFailWindow, s.limiter.max))
+	}
+}
+
+// noteCamouflageFailure records a camouflage miss for peerIP against its own
+// limiter. Feeding these into the /auth limiter would let five ordinary
+// browser requests to the decor URL — the traffic camouflage exists for —
+// lock /auth out for every VPN user behind a shared NAT address.
+func (s *Server) noteCamouflageFailure(peerIP string) {
+	if s.camoLimiter.recordFailure(peerIP) {
+		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: camouflage limiter: %s over %d misses in %v, no longer answered", peerIP, s.camoLimiter.max, authFailWindow))
 	}
 }

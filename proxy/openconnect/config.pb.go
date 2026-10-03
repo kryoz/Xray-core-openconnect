@@ -352,7 +352,7 @@ var File_proxy_openconnect_config_proto protoreflect.FileDescriptor
 
 const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\n" +
-	"\x1eproxy/openconnect/config.proto\x12\x16xray.proxy.openconnect\"\x90\x01\n" +
+	"\x1eproxy/openconnect/config.proto\x12\x16xray.proxy.openconnect\"\x96\x01\n" +
 	"\x04User\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12\x0e\n" +
@@ -360,13 +360,13 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\x06routes\x18\x04 \x03(\tR\x06routes\x12\x14\n" +
 	"\x05group\x18\x05 \x01(\tR\x05group\x12\x13\n" +
 	"\x02l3\x18\x06 \x01(\bH\x00R\x02l3\x88\x01\x01B\x05\n" +
-	"\x03_l3\"l\n" +
+	"\x03_l3J\x04\b\a\x10\b\"r\n" +
 	"\x05Group\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06routes\x18\x02 \x03(\tR\x06routes\x12\x1b\n" +
 	"\tno_routes\x18\x04 \x03(\tR\bnoRoutes\x12\x13\n" +
 	"\x02l3\x18\x05 \x01(\bH\x00R\x02l3\x88\x01\x01B\x05\n" +
-	"\x03_l3\"\xc3\x03\n" +
+	"\x03_l3J\x04\b\x03\x10\x04\"\xcf\x03\n" +
 	"\x18OpenConnectInboundConfig\x122\n" +
 	"\x05users\x18\x01 \x03(\v2\x1c.xray.proxy.openconnect.UserR\x05users\x12\x16\n" +
 	"\x06subnet\x18\x02 \x01(\tR\x06subnet\x12\x10\n" +
@@ -381,7 +381,8 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\x06routes\x18\v \x03(\tR\x06routes\x12+\n" +
 	"\x11camouflage_secret\x18\f \x01(\tR\x10camouflageSecret\x12)\n" +
 	"\x10camouflage_realm\x18\r \x01(\tR\x0fcamouflageRealm\x125\n" +
-	"\x06groups\x18\x0e \x03(\v2\x1d.xray.proxy.openconnect.GroupR\x06groupsBd\n" +
+	"\x06groups\x18\x0e \x03(\v2\x1d.xray.proxy.openconnect.GroupR\x06groupsJ\x04\b\n" +
+	"\x10\vJ\x04\b\x0f\x10\x10Bd\n" +
 	"\x1acom.xray.proxy.openconnectP\x01Z+github.com/xtls/xray-core/proxy/openconnect\xaa\x02\x16Xray.Proxy.OpenConnectb\x06proto3"
 
 var (

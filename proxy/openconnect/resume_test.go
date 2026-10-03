@@ -96,14 +96,15 @@ func newTestServerUsers(t *testing.T, users []*User) *Server {
 	registry := newSessionRegistry(pool)
 	stack := newOCStack(tctx, nil, "openconnect", mtuOf(conf), registry, 0)
 	s := &Server{
-		conf:     conf,
-		ctx:      tctx,
-		cancel:   cancel,
-		src:      xnet.DestinationFromAddr(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: tcpPort}),
-		cert:     cert,
-		registry: registry,
-		users:    store,
-		limiter:  newAuthLimiter(),
+		conf:        conf,
+		ctx:         tctx,
+		cancel:      cancel,
+		src:         xnet.DestinationFromAddr(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: tcpPort}),
+		cert:        cert,
+		registry:    registry,
+		users:       store,
+		limiter:     newAuthLimiter(authFailMax),
+		camoLimiter: newAuthLimiter(camoFailMax),
 
 		stack:  stack,
 		device: stack.device,
@@ -297,8 +298,14 @@ func TestResumePreservesIP(t *testing.T) {
 	}
 	_ = c2.Close() // simulate tunnel disconnect
 
-	// Give the server a moment to observe the disconnect.
-	time.Sleep(50 * time.Millisecond)
+	// Wait until the server has actually retired the tunnel. A fixed sleep lets
+	// the next CONNECT race past the disconnect: the request then goes through
+	// the supersede path and the resume branch under test is never exercised.
+	sess := s.registry.getBySID(sidFromCookie(t, s, cookie))
+	if sess == nil {
+		t.Fatal("no session registered for cookie")
+	}
+	waitDisconnected(t, sess)
 
 	// Connection 3: resume — CONNECT with the same cookie, no auth forms.
 	c3 := dialOC(t, s)
@@ -514,18 +521,51 @@ func TestReAuthKeepsOtherUsersSession(t *testing.T) {
 		{Name: "bob", Password: testPW("pw-b")},
 	})
 
-	for _, u := range []struct{ name, pw string }{{"alice", "pw-a"}, {"bob", "pw-b"}} {
-		body := fmt.Sprintf(`<?xml version="1.0"?><config-auth client="vpn" type="auth-reply"><auth><username>%s</username><password>%s</password></auth></config-auth>`, u.name, u.pw)
+	auth := func(name, pw string) int {
+		t.Helper()
+		body := fmt.Sprintf(`<?xml version="1.0"?><config-auth client="vpn" type="auth-reply"><auth><username>%s</username><password>%s</password></auth></config-auth>`, name, pw)
 		c := dialOC(t, s)
+		defer func() { _ = c.Close() }()
 		writeReq(c, "POST", "/auth", body, "")
-		if st, _, _, _ := readResp(t, c); st != 200 {
-			t.Fatalf("auth %s: status %d, want 200", u.name, st)
-		}
-		_ = c.Close()
+		st, _, _, _ := readResp(t, c)
+		return st
 	}
 
+	// Both users authenticate from the same peer address: the test server is
+	// local, so one address carrying two users is the NAT case itself.
+	for _, u := range []struct{ name, pw string }{{"alice", "pw-a"}, {"bob", "pw-b"}} {
+		if st := auth(u.name, u.pw); st != 200 {
+			t.Fatalf("auth %s: status %d, want 200", u.name, st)
+		}
+	}
 	if got := s.registry.count(); got != 2 {
 		t.Fatalf("registry count after two distinct users from one peer: got %d, want 2", got)
+	}
+
+	// Pick Bob's session out by SID so it can be looked up again below.
+	var bobSID [32]byte
+	s.registry.mu.RLock()
+	for sid, sess := range s.registry.bySID {
+		if sess.userName() == "bob" {
+			bobSID = sid
+		}
+	}
+	s.registry.mu.RUnlock()
+	if bobSID == [32]byte{} {
+		t.Fatal("bob's session not found in the registry")
+	}
+
+	// The claim under test: a cookie-less re-auth supersedes only its own
+	// user's sessions. With the sweep keyed by peer address instead, this is
+	// exactly the request that would drop Bob's resume cookie.
+	if st := auth("alice", "pw-a"); st != 200 {
+		t.Fatalf("re-auth alice: status %d, want 200", st)
+	}
+	if s.registry.getBySID(bobSID) == nil {
+		t.Fatal("bob's session was superseded by alice's re-auth")
+	}
+	if got := s.registry.count(); got != 2 {
+		t.Fatalf("registry count after alice's re-auth: got %d, want 2", got)
 	}
 }
 
