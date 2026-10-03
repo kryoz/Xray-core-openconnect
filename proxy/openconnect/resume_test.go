@@ -357,3 +357,82 @@ func TestRegistryByVirtIP(t *testing.T) {
 		t.Fatal("getByVirtIP after remove: want nil")
 	}
 }
+
+// TestReAuthReplacesZombieSession: with max_clients set, a cookie-less re-auth
+// from the same peer must replace the disconnected session — otherwise the
+// zombie lingers for the whole cookie window and a chatty reconnect loop
+// exhausts max_clients for a single client. A live tunnel from the same peer
+// is a real second client (NAT) and must be left alone, rejected by the
+// max-clients check instead.
+func TestReAuthReplacesZombieSession(t *testing.T) {
+	const authBody = `<?xml version="1.0"?><config-auth client="vpn" type="auth-reply"><auth><username>testuser</username><password>testpass</password></auth></config-auth>`
+
+	for _, tc := range []struct {
+		name       string
+		liveTunnel bool
+		want       int
+		wantCount  int
+	}{
+		{name: "disconnected session replaced", want: 200, wantCount: 1},
+		{name: "live tunnel from same peer kept", liveTunnel: true, want: 503, wantCount: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			s.conf.MaxClients = 1
+
+			// First auth (combined username+password form).
+			c1 := dialOC(t, s)
+			writeReq(c1, "POST", "/auth", authBody, "")
+			st, _, setCookies, _ := readResp(t, c1)
+			if st != 200 {
+				t.Fatalf("first auth: status %d, want 200", st)
+			}
+			cookie := cookieValue(setCookies)
+			if cookie == "" {
+				t.Fatalf("no webvpn cookie in %v", setCookies)
+			}
+			_ = c1.Close()
+
+			// Establish the tunnel.
+			c2 := dialOC(t, s)
+			writeReq(c2, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
+			if st, _, _, _ := readResp(t, c2); st != 200 {
+				t.Fatalf("CONNECT: status %d, want 200", st)
+			}
+
+			if !tc.liveTunnel {
+				_ = c2.Close()
+				// Deterministic: wait until the server observed the disconnect.
+				sid, err := base64.StdEncoding.DecodeString(cookie)
+				if err != nil {
+					t.Fatalf("decode cookie: %v", err)
+				}
+				var key [32]byte
+				copy(key[:], sid)
+				sess := s.registry.getBySID(key)
+				deadline := time.Now().Add(5 * time.Second)
+				for sess.isConnected() {
+					if time.Now().After(deadline) {
+						t.Fatal("server did not observe the disconnect in time")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+
+			// Second full auth from the same peer IP, no cookie.
+			c3 := dialOC(t, s)
+			writeReq(c3, "POST", "/auth", authBody, "")
+			st, _, _, _ = readResp(t, c3)
+			if st != tc.want {
+				t.Fatalf("re-auth: status %d, want %d", st, tc.want)
+			}
+			if got := s.registry.count(); got != tc.wantCount {
+				t.Fatalf("registry count: got %d, want %d", got, tc.wantCount)
+			}
+			_ = c3.Close()
+			if tc.liveTunnel {
+				_ = c2.Close()
+			}
+		})
+	}
+}

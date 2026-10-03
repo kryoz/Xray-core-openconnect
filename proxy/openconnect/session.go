@@ -119,6 +119,13 @@ func (s *ocSession) markConnected() {
 	s.mu.Unlock()
 }
 
+// isConnected reports whether the session's tunnel is currently up.
+func (s *ocSession) isConnected() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.connected
+}
+
 // expired reports whether the session's cookie/resume window has elapsed.
 // A connected session, or one that never disconnected, never expires.
 func (s *ocSession) expired(now time.Time, cookieTimeout time.Duration) bool {

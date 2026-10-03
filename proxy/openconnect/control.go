@@ -220,6 +220,15 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, pending *
 	}
 	s.limiter.reset(peerIP)
 
+	// A cookie-less re-auth (app restart, VPN toggle, lost cookie) must not
+	// leak the previous session: it would linger in the registry for the
+	// whole cookie window, and a chatty reconnect loop would exhaust
+	// max_clients for a single client. A live tunnel from the same peer is
+	// a real second client (NAT) and is left to the max-clients check.
+	if old := s.registry.getByClientIP(peerIP); old != nil && !old.isConnected() {
+		s.registry.remove(s.ctx, old, "superseded by re-auth from same peer")
+	}
+
 	if s.conf.MaxClients > 0 && s.registry.count() >= int(s.conf.MaxClients) {
 		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: max clients reached, rejecting %s", peerIP))
 		_ = writeHTTP(tc, 503, "text/plain", nil, "too many clients")
