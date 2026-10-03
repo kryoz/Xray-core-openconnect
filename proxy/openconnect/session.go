@@ -32,11 +32,6 @@ type ocSession struct {
 	mu        sync.Mutex
 	connected bool
 	lastDisc  time.Time // last tunnel disconnect; drives cookie/resume TTL
-	// multiFrame records the CONNECT negotiation (X-CSTP-Multi-Frame-
-	// Capability): the client parses several STF frames per TLS record.
-	// Set under mu by handleConnect before the response is written;
-	// consulted when the device writer is registered.
-	multiFrame bool
 	// writer is the device writer token this session's live tunnel registered;
 	// teardown unregisters it only while it still owns the slot (two sessions
 	// of one user may share a static virtual IP). Guarded by mu.
@@ -163,10 +158,16 @@ func newSessionRegistry(pool *ipPool) *sessionRegistry {
 	}
 }
 
-// create allocates a session with a fresh SID and a virtual IP.
+// create allocates a session with a fresh SID and a virtual IP. A session
+// always belongs to an authenticated user: remove/sweep release the IP lease
+// through user.Ip and the L4 attribution reads user.Name, so a nil user is a
+// caller bug, not a state to carry through the registry.
 func (r *sessionRegistry) create(clientIP string, user *User, l3 bool) (*ocSession, error) {
+	if user == nil {
+		return nil, errors.New("session without a user")
+	}
 	sess := &ocSession{clientIP: clientIP, user: user, l3: l3, created: time.Now(), lastDisc: time.Now()}
-	if user != nil && l3 {
+	if l3 {
 		r.anyL3.Store(true)
 	}
 	if _, err := rand.Read(sess.sid[:]); err != nil {

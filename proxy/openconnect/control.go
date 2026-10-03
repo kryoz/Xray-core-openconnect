@@ -21,11 +21,14 @@ import (
 const (
 	// authTimeout bounds how long a control connection may idle during auth.
 	authTimeout = 240 * time.Second
-	// cstpOverhead is the exact wire cost of one CSTP frame over the TLS
-	// control channel: 1 CSTP type byte + 5 TLS record header + 16 IV + 16
-	// AEAD tag + 20 TCP + 20 IPv4. Both the advertised X-CSTP-MTU and the
-	// gVisor NIC MTU are baseMTU - cstpOverhead, so a maximal IP packet in
-	// either direction is a datagram of exactly the base MTU: no outer
+	// cstpOverhead is the wire cost of one CSTP frame over the TLS control
+	// channel, taken at its worst case: 1 CSTP type byte + 5 TLS record
+	// header + 16 IV + 16 AEAD tag + 20 TCP + 20 IPv4. TLS 1.2 AEAD carries
+	// an explicit 16-byte IV, TLS 1.3 does not (62 there), and the control
+	// channel accepts either — so the constant is deliberately the pessimistic
+	// one: both the advertised X-CSTP-MTU and the gVisor NIC MTU are
+	// baseMTU - cstpOverhead, so a maximal IP packet in either direction is a
+	// datagram of at most the base MTU on any allowed TLS version: no outer
 	// fragmentation, and the client-side MSS (X-CSTP-MTU - 40) lines up with
 	// the server-side one — sub-MSS incoming segments no longer split into
 	// two datagrams each (the ~1.4x pps anomaly of the 2026-09-27 report).
@@ -223,9 +226,12 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, pending *
 	// A cookie-less re-auth (app restart, VPN toggle, lost cookie) must not
 	// leak the previous session: it would linger in the registry for the
 	// whole cookie window, and a chatty reconnect loop would exhaust
-	// max_clients for a single client. A live tunnel from the same peer is
-	// a real second client (NAT) and is left to the max-clients check.
-	if old := s.registry.getByClientIP(peerIP); old != nil && !old.isConnected() {
+	// max_clients for a single client. Only this user's own disconnected
+	// session is superseded: byClientIP keeps just the newest session of a
+	// peer, so behind a NAT the lookup can return a different user, whose
+	// resume cookie must survive. A live tunnel is left to the max-clients
+	// check.
+	if old := s.registry.getByClientIP(peerIP); old != nil && !old.isConnected() && old.userName() == user {
 		s.registry.remove(s.ctx, old, "superseded by re-auth from same peer")
 	}
 
@@ -238,6 +244,9 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, pending *
 	u := s.users.userByName(user)
 	sess, err := s.registry.create(peerIP, u, s.conf.l3For(u))
 	if err != nil {
+		// Pool exhaustion or a bad static IP: without this line the client
+		// just sees a 500 and the cause is invisible.
+		errors.LogWarning(s.ctx, "openconnect: session create failed for ", user, ": ", err)
 		_ = writeHTTP(tc, 500, "text/plain", nil, "internal error")
 		return
 	}
@@ -267,13 +276,9 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq) {
 	}
 	sess.markConnected()
 	// Multi-frame support is per-connection: each CONNECT (including resume
-	// and rekey) re-negotiates it from the request headers.
+	// and rekey) re-negotiates it from the request headers, and the result
+	// lives only in this cstpPump run.
 	multiFrame := strings.EqualFold(req.headers["x-cstp-multi-frame-capability"], "true")
-	// Publish before the CONNECT response: cstpPump consults sess.multiFrame
-	// when registering its writer.
-	sess.mu.Lock()
-	sess.multiFrame = multiFrame
-	sess.mu.Unlock()
 	// Paired with "tunnel closed" from cstpPump: open/close per CSTP
 	// connection, while "session start"/"session end" bracket the whole
 	// cookie lifetime.

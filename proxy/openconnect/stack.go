@@ -329,7 +329,7 @@ func (e *ocLinkEndpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.E
 	// client negotiated X-CSTP-Multi-Frame-Capability — stock clients
 	// require one STF frame per TLS record) get one batched write per flush,
 	// everyone else keeps the per-frame path.
-	batches := make(map[*ocWriter][][]byte)
+	var batches map[*ocWriter][][]byte // nil until a batch-capable writer is seen
 	for _, pb := range list.AsSlice() {
 		framed, dest := d.frame(pb)
 		if !dest.IsValid() {
@@ -344,6 +344,9 @@ func (e *ocLinkEndpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.E
 			continue
 		}
 		if w.batch != nil {
+			if batches == nil {
+				batches = make(map[*ocWriter][][]byte)
+			}
 			batches[w] = append(batches[w], framed)
 		} else if err := w.f(framed); err != nil {
 			return n, &tcpip.ErrAborted{}

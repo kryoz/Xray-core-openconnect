@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
@@ -59,14 +60,20 @@ func testPW(password string) string {
 // boolP returns a pointer to a bool, for building optional proto fields in tests.
 func boolP(v bool) *bool { return &v }
 
-// newTestServer builds a Server on a free localhost port, bypassing the DI path
-// (policy/dispatcher are unused by the control channel).
+// newTestServer builds a Server with the default single test user.
 func newTestServer(t *testing.T) *Server {
+	t.Helper()
+	return newTestServerUsers(t, []*User{{Name: "testuser", Password: testPW("testpass")}})
+}
+
+// newTestServerUsers builds a Server on a free localhost port, bypassing the DI
+// path (policy/dispatcher are unused by the control channel).
+func newTestServerUsers(t *testing.T, users []*User) *Server {
 	t.Helper()
 	tcpPort := freePort(t, "tcp")
 
 	conf := &OpenConnectInboundConfig{
-		Users:         []*User{{Name: "testuser", Password: testPW("testpass")}},
+		Users:         users,
 		Subnet:        "10.99.0.0/24",
 		Mtu:           1400,
 		Dpd:           90,
@@ -76,7 +83,7 @@ func newTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("pool: %v", err)
 	}
-	users, err := newUserStore(conf.Users)
+	store, err := newUserStore(conf.Users)
 	if err != nil {
 		t.Fatalf("users: %v", err)
 	}
@@ -95,7 +102,7 @@ func newTestServer(t *testing.T) *Server {
 		src:      xnet.DestinationFromAddr(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: tcpPort}),
 		cert:     cert,
 		registry: registry,
-		users:    users,
+		users:    store,
 		limiter:  newAuthLimiter(),
 
 		stack:  stack,
@@ -434,5 +441,46 @@ func TestReAuthReplacesZombieSession(t *testing.T) {
 				_ = c2.Close()
 			}
 		})
+	}
+}
+
+// TestReAuthKeepsOtherUsersSession: behind a NAT two users share one peer IP,
+// and byClientIP keeps only the newest session of that peer. A cookie-less
+// re-auth must supersede only its own user's disconnected session — the other
+// user's resume cookie must survive.
+func TestReAuthKeepsOtherUsersSession(t *testing.T) {
+	s := newTestServerUsers(t, []*User{
+		{Name: "alice", Password: testPW("pw-a")},
+		{Name: "bob", Password: testPW("pw-b")},
+	})
+
+	for _, u := range []struct{ name, pw string }{{"alice", "pw-a"}, {"bob", "pw-b"}} {
+		body := fmt.Sprintf(`<?xml version="1.0"?><config-auth client="vpn" type="auth-reply"><auth><username>%s</username><password>%s</password></auth></config-auth>`, u.name, u.pw)
+		c := dialOC(t, s)
+		writeReq(c, "POST", "/auth", body, "")
+		if st, _, _, _ := readResp(t, c); st != 200 {
+			t.Fatalf("auth %s: status %d, want 200", u.name, st)
+		}
+		_ = c.Close()
+	}
+
+	if got := s.registry.count(); got != 2 {
+		t.Fatalf("registry count after two distinct users from one peer: got %d, want 2", got)
+	}
+}
+
+// TestRegistryCreateRejectsNilUser pins the registry contract: every session
+// belongs to a user, because remove/sweep release the IP lease through user.Ip.
+func TestRegistryCreateRejectsNilUser(t *testing.T) {
+	pool, err := newIPPool("10.99.0.0/24")
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	r := newSessionRegistry(pool)
+	if _, err := r.create("1.2.3.4", nil, false); err == nil {
+		t.Fatal("create with nil user: want error, got nil")
+	}
+	if got := r.count(); got != 0 {
+		t.Fatalf("registry count: got %d, want 0", got)
 	}
 }
