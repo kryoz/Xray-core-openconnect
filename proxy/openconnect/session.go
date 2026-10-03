@@ -45,6 +45,12 @@ type ocSession struct {
 	pipe      *ocPipe              // UDP demux pipe backing the DTLS conn (for NAT rebinding)
 	cstpWrite func([]byte) error   // live CSTP/TCP fallback writer; nil once the TCP conn closes
 	cstpBatch func([][]byte) error // CSTP batch writer; nil once the TCP conn closes
+	// multiFrame records the CONNECT negotiation (X-CSTP-Multi-Frame-
+	// Capability): the client parses several STF frames per TLS record and
+	// several DTLS records per datagram. Set under mu by handleConnect
+	// before the response is written; consulted when the DTLS writer is
+	// registered.
+	multiFrame bool
 	// dtlsWriter is the device writer token this session's live DTLS
 	// generation registered; teardown unregisters it only while it still
 	// owns the slot (two sessions of one user may share a static virtual IP).

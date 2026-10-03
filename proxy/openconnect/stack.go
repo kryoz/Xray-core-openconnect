@@ -639,11 +639,11 @@ func createOCStack(ep stack.LinkEndpoint) (*stack.Stack, error) {
 
 	// The fifo qdisc feeds WritePackets with whole gVisor flushes (up to 47
 	// packets) instead of one packet per call, which is what makes per-writer
-	// coalescing possible. Coalescing is per-writer and negotiated: only CSTP
-	// sessions that sent X-CSTP-Multi-Frame-Capability in their CONNECT —
-	// stock openconnect requires exactly one STF frame per TLS record — and
-	// the DTLS writer (WriteBatch packs records up to the datagram MTU) get
-	// batched writes; everyone else keeps one frame per write.
+	// coalescing possible. Coalescing is per-writer and negotiated: batched
+	// writes — several CSTP frames per TLS record, several DTLS records per
+	// datagram — go only to sessions that sent X-CSTP-Multi-Frame-Capability
+	// in their CONNECT; stock openconnect needs one frame per record and one
+	// record per datagram.
 	// ponytail: n=1 = one flush goroutine; a slow client's blocked write can
 	// head-of-line-block other clients on this NIC; raise n if multi-client
 	// throughput shows it.

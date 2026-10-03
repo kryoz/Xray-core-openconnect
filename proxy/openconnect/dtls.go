@@ -247,14 +247,23 @@ func (s *Server) startDTLSSession(sess *ocSession, pipe *ocPipe, addr *net.UDPAd
 	}
 	// Batch the frames of one gVisor flush into a single WriteBatch: the
 	// kryoz/pion fork packs several records per datagram but never beyond
-	// the connection MTU, cutting a sendto per record without outer
-	// fragmentation.
+	// the connection MTU, without outer fragmentation. Negotiated sessions
+	// only (the registration below): stock clients read one DTLS record per
+	// poll event (dtls_mainloop) and stall on the leftover records of a
+	// packed datagram.
 	batchWriter := func(frames [][]byte) error {
 		return dc.WriteBatch(frames)
 	}
 	sess.mu.Lock()
+	multiFrame := sess.multiFrame
 	sess.dtlsConn = dc
-	sess.dtlsWriter = s.device.registerBatch(sess.ip, dtlsWriter, batchWriter)
+	if multiFrame {
+		sess.dtlsWriter = s.device.registerBatch(sess.ip, dtlsWriter, batchWriter)
+	} else {
+		// One record per datagram for stock clients: dtls_mainloop reads a
+		// single record per poll event, so packed datagrams stall it.
+		sess.dtlsWriter = s.device.register(sess.ip, dtlsWriter)
+	}
 	sess.mu.Unlock()
 	errors.LogInfo(s.ctx, "openconnect: DTLS established for ", sess.ip)
 	sess.touchActivity()

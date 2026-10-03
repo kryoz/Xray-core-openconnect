@@ -156,6 +156,85 @@ func TestDTLSDataPath(t *testing.T) {
 	}
 }
 
+// TestDTLSMultiFrameWriterGating verifies the DTLS writer honors the
+// multi-frame negotiation: a stock session's DTLS tunnel registers without a
+// batch function (one record per datagram — dtls_mainloop reads one record
+// per poll event), a negotiated session's with one.
+func TestDTLSMultiFrameWriterGating(t *testing.T) {
+	s := newTestServer(t)
+
+	for _, tt := range []struct {
+		name       string
+		multiFrame bool
+	}{
+		{"stock", false},
+		{"negotiated", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var c2 *tls.Conn
+			var sess *ocSession
+			if tt.multiFrame {
+				c2, _, sess = ocConnectMF(t, s, true)
+			} else {
+				c2, _, sess = ocConnect(t, s)
+			}
+			defer func() { _ = c2.Close() }()
+
+			udpAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(s.conf.DtlsPort)}
+			pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen udp: %v", err)
+			}
+			defer func() { _ = pc.Close() }()
+
+			dc, err := dtls.ClientWithOptions(pc, udpAddr,
+				dtls.WithPSK(func(_ []byte) ([]byte, error) { return sess.getPSK(), nil }),
+				dtls.WithPSKIdentityHint([]byte("psk")),
+				dtls.WithCipherSuites(
+					dtls.TLS_PSK_WITH_AES_128_GCM_SHA256,
+					dtls.TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
+				),
+			)
+			if err != nil {
+				t.Fatalf("dtls client: %v", err)
+			}
+			defer func() { _ = dc.Close() }()
+			if err := dc.HandshakeContext(context.Background()); err != nil {
+				t.Fatalf("dtls handshake: %v", err)
+			}
+
+			// Wait for the server to register this DTLS generation (dtlsConn
+			// is set in the same locked section as the writer), then check
+			// the registered writer's batch capability.
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				sess.mu.Lock()
+				up := sess.dtlsConn != nil
+				sess.mu.Unlock()
+				if up {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("DTLS not established on the server in time")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			s.device.mu.RLock()
+			w := s.device.tunnels[sess.ip]
+			s.device.mu.RUnlock()
+			if w == nil {
+				t.Fatal("no tunnel writer registered")
+			}
+			if tt.multiFrame && w.batch == nil {
+				t.Error("negotiated session: DTLS writer has no batch function")
+			}
+			if !tt.multiFrame && w.batch != nil {
+				t.Error("stock session: DTLS writer must not batch (one record per datagram)")
+			}
+		})
+	}
+}
+
 // fakeCounter is a minimal stats.Counter for test assertions.
 type fakeCounter struct {
 	n int64

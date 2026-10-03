@@ -322,6 +322,11 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq, kl 
 	// Multi-frame support is per-connection: each CONNECT (including resume
 	// and rekey) re-negotiates it from the request headers.
 	multiFrame := strings.EqualFold(req.headers["x-cstp-multi-frame-capability"], "true")
+	// Publish before the CONNECT response: a DTLS session started right
+	// after CONNECT consults sess.multiFrame when registering its writer.
+	sess.mu.Lock()
+	sess.multiFrame = multiFrame
+	sess.mu.Unlock()
 	// Paired with "tunnel closed" from cstpPump: open/close per CSTP
 	// connection, while "session start"/"session end" bracket the whole
 	// cookie lifetime.
