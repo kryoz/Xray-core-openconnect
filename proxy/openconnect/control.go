@@ -223,19 +223,16 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, pending *
 	}
 	s.limiter.reset(peerIP)
 
-	// A cookie-less re-auth (app restart, VPN toggle, lost cookie) must not
-	// leak the previous session: it would linger in the registry for the
-	// whole cookie window, and a chatty reconnect loop would exhaust
-	// max_clients for a single client. Only this user's own disconnected
-	// session is superseded: byClientIP keeps just the newest session of a
-	// peer, so behind a NAT the lookup can return a different user, whose
-	// resume cookie must survive. A live tunnel is left to the max-clients
-	// check.
-	if old := s.registry.getByClientIP(peerIP); old != nil && !old.isConnected() && old.userName() == user {
-		s.registry.remove(s.ctx, old, "superseded by re-auth from same peer")
-	}
+	// A cookie-less re-auth (app restart, VPN toggle, lost cookie, changed
+	// source address) must not leave the previous session behind: every attempt
+	// would hold a dynamic IP for the whole cookie window. Keyed by user, not
+	// by peer address — behind a NAT one address is several users, and a mobile
+	// client changes it on every attempt.
+	s.registry.supersedeStale(s.ctx, user)
 
-	if s.conf.MaxClients > 0 && s.registry.count() >= int(s.conf.MaxClients) {
+	// max_clients bounds live tunnels, not session records: a session inside its
+	// resume window without a tunnel holds an IP lease, not a client slot.
+	if s.conf.MaxClients > 0 && s.registry.countConnected() >= int(s.conf.MaxClients) {
 		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: max clients reached, rejecting %s", peerIP))
 		_ = writeHTTP(tc, 503, "text/plain", nil, "too many clients")
 		return
@@ -274,7 +271,11 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq) {
 		_ = writeHTTP(tc, 401, "text/plain", nil, "unauthorized")
 		return
 	}
-	sess.markConnected()
+	// One tunnel per session: a new CONNECT replaces the previous one, as
+	// ocserv's worker does. Otherwise a reconnect after a dropped path leaves
+	// the old pump half-open, holding the device writer slot and the IP lease
+	// while the session looks disconnected.
+	gen := sess.openTunnel(tc)
 	// Multi-frame support is per-connection: each CONNECT (including resume
 	// and rekey) re-negotiates it from the request headers, and the result
 	// lives only in this cstpPump run.
@@ -287,7 +288,7 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq) {
 	// ocserv sends NO body after the blank line; the client reads the rest as
 	// tunnel data. The TCP connection then stays open as the CSTP data channel.
 	_ = writeHTTP(tc, 200, "", s.connectHeaders(sess), "")
-	s.cstpPump(sess, tc, br, multiFrame)
+	s.cstpPump(sess, tc, br, multiFrame, gen)
 }
 
 // stfBatch packs several [acPKTData]+IP frames into one CSTP/TCP buffer, each
@@ -394,8 +395,10 @@ func (c *cstpCoalescer) close() {
 // (ocserv src/worker-vpn.c timers). With multiFrame set (the client
 // negotiated X-CSTP-Multi-Frame-Capability), the downlink frames of one
 // gVisor flush are coalesced into a single TLS write; otherwise each frame is
-// its own TLS record, which stock clients require.
-func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader, multiFrame bool) {
+// its own TLS record, which stock clients require. gen is the tunnel generation
+// from openTunnel: when a newer CONNECT supersedes this tunnel its connection
+// is closed, and the pump exits through the read error.
+func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader, multiFrame bool, gen uint64) {
 	// The device writer (gVisor goroutine) and the keepalive/DPD timers below
 	// both write to the TLS connection; crypto/tls does not document
 	// concurrent Write as safe, so serialize frames here.
@@ -409,6 +412,13 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader, multi
 		wmu.Lock()
 		defer wmu.Unlock()
 		_, err := tc.Write(f)
+		if err != nil {
+			// A failed write means the tunnel is gone: crypto/tls does not
+			// recover from a write error, and without this the downlink stays
+			// a black hole until the DPD timer fires. Closing the connection
+			// makes the read loop exit at once.
+			_ = tc.Close()
+		}
 		return err
 	}
 	deviceWriter := func(framed []byte) error { // device contract: [acPKTData]+ip
@@ -433,6 +443,9 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader, multi
 			wmu.Lock()
 			defer wmu.Unlock()
 			_, err := tc.Write(stfBatch(frames))
+			if err != nil {
+				_ = tc.Close() // same rule as writeFrame: a dead write ends the tunnel
+			}
 			return err
 		}
 		defer coalescer.close()
@@ -447,27 +460,28 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader, multi
 	}
 
 	// Registered BEFORE the writer-cleanup defer below so it runs after it
-	// (defers are LIFO): by logging time the cleanup has already set
-	// connected=false, so the line reflects the settled state.
+	// (defers are LIFO): by logging time the cleanup has already released the
+	// tunnel, so the line reflects the settled state.
 	started := time.Now()
 	closeReason := "client closed CSTP"
 	defer func() { sess.logTunnelClosed(s.ctx, closeReason, started) }()
 
-	// Register the device writer for this tunnel; the defer below removes
-	// exactly the entry this pump installed (two sessions of one user may
-	// share a static virtual IP, so the token is compared, not the slot).
+	// Register the device writer for this tunnel. The defer below unregisters
+	// exactly the token this pump installed: a superseded pump, or a stale
+	// session of one user sharing a static virtual IP, must not steal the
+	// successor's slot.
+	myWriter := registerCSTP()
 	sess.mu.Lock()
-	sess.writer = registerCSTP()
+	sess.writer = myWriter
 	sess.mu.Unlock()
 	defer func() {
 		sess.mu.Lock()
-		if sess.writer != nil {
-			s.device.unregisterIf(sess.ip, sess.writer)
+		if sess.writer == myWriter {
+			s.device.unregisterIf(sess.ip, myWriter)
 			sess.writer = nil
 		}
-		sess.connected = false
-		sess.lastDisc = time.Now()
 		sess.mu.Unlock()
+		sess.closeTunnel(gen)
 	}()
 
 	ka := time.Duration(cstpKeepalive) * time.Second
@@ -497,6 +511,13 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader, multi
 					_ = writeFrame(acPKTKeepalive, nil)
 				}
 				continue
+			}
+			if sess.isSuperseded(gen) {
+				// Our own connection was closed by openTunnel: expected, not a
+				// client-path failure.
+				closeReason = "superseded by a newer CONNECT"
+				errors.LogDebug(s.ctx, "openconnect: CSTP tunnel superseded for ", sess.ip, " (user ", sess.userName(), ")")
+				return
 			}
 			if err != io.EOF {
 				closeReason = "read error: " + err.Error()

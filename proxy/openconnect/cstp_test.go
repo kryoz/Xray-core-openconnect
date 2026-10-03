@@ -162,9 +162,7 @@ func TestCSTPDPDKillsIdleSession(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		sess.mu.Lock()
-		disconnected := !sess.connected
-		sess.mu.Unlock()
+		disconnected := !sess.isConnected()
 		if disconnected {
 			return
 		}

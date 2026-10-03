@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"strconv"
@@ -29,8 +30,14 @@ type ocSession struct {
 	// the GC sweep can reap the same session.
 	endOnce sync.Once
 
-	mu        sync.Mutex
-	connected bool
+	mu      sync.Mutex
+	tunnels int // live cstpPump instances; the session is connected while > 0
+	// tunnelGen counts CONNECTs. A pump whose gen is no longer current was
+	// superseded by a newer CONNECT: its TCP connection is already closed and
+	// its teardown must not touch the successor's writer or kick. kick closes
+	// the current tunnel's connection; openTunnel calls the previous one's.
+	tunnelGen uint64
+	kick      func()
 	lastDisc  time.Time // last tunnel disconnect; drives cookie/resume TTL
 	// writer is the device writer token this session's live tunnel registered;
 	// teardown unregisters it only while it still owns the slot (two sessions
@@ -107,42 +114,80 @@ func (s *ocSession) logSessionEnd(ctx context.Context, reason string) {
 	errors.LogInfo(ctx, s.sessionEndLine(reason, time.Now()))
 }
 
-// markConnected records that the tunnel is (re)established.
-func (s *ocSession) markConnected() {
+// openTunnel registers a new tunnel and supersedes the previous one: a CONNECT
+// (app restart, VPN toggle, rekey, reconnect after a lost cookie) replaces the
+// live tunnel instead of leaving it half-open, as ocserv's worker does. It
+// returns the generation the pump must compare against in closeTunnel.
+func (s *ocSession) openTunnel(tc io.Closer) uint64 {
 	s.mu.Lock()
-	s.connected = true
+	s.tunnels++
+	s.tunnelGen++
+	gen := s.tunnelGen
+	prev := s.kick
+	s.kick = func() { _ = tc.Close() }
+	s.mu.Unlock()
+	if prev != nil {
+		prev()
+	}
+	return gen
+}
+
+// closeTunnel retires one pump. The session stops being connected, and the
+// cookie/resume window starts running, only when its last tunnel is gone; a
+// superseded pump never clears its successor's kick.
+func (s *ocSession) closeTunnel(gen uint64) {
+	s.mu.Lock()
+	if s.tunnels > 0 {
+		s.tunnels--
+	}
+	if s.tunnelGen == gen {
+		s.kick = nil
+	}
+	if s.tunnels == 0 {
+		s.lastDisc = time.Now()
+	}
 	s.mu.Unlock()
 }
 
-// isConnected reports whether the session's tunnel is currently up.
+// isSuperseded reports whether a newer CONNECT replaced this pump; the read
+// error that follows is then expected, not a client-path failure.
+func (s *ocSession) isSuperseded(gen uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tunnelGen != gen
+}
+
+// isConnected reports whether the session has a live tunnel.
 func (s *ocSession) isConnected() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.connected
+	return s.tunnels > 0
 }
 
 // expired reports whether the session's cookie/resume window has elapsed.
-// A connected session, or one that never disconnected, never expires.
+// A session with a live tunnel, or one that never disconnected, never expires.
 func (s *ocSession) expired(now time.Time, cookieTimeout time.Duration) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.connected || s.lastDisc.IsZero() {
+	if s.tunnels > 0 || s.lastDisc.IsZero() {
 		return false
 	}
 	return now.Sub(s.lastDisc) > cookieTimeout
 }
 
-// sessionRegistry tracks live sessions by SID (cookie), client IP, and
-// virtual IP.
+// sessionRegistry tracks live sessions by SID (cookie) and virtual IP. The
+// client's source address is kept on the session for logging only: it is not a
+// lookup key, because a mobile or IPv6 client changes it on every reconnect and
+// many users share one address behind a NAT.
 type sessionRegistry struct {
 	// RWMutex: the index maps are read on the per-packet relay path and per
 	// TCP-flow setup, but written only on auth/CONNECT/sweep — readers must
-	// not serialize each other.
-	mu         sync.RWMutex
-	bySID      map[[32]byte]*ocSession
-	byClientIP map[string]*ocSession
-	byVirtIP   map[netip.Addr]*ocSession
-	pool       *ipPool
+	// not serialize each other. Lock order: registry mu before a session's mu
+	// (sweep, countConnected and supersedeStale all check session state here).
+	mu       sync.RWMutex
+	bySID    map[[32]byte]*ocSession
+	byVirtIP map[netip.Addr]*ocSession
+	pool     *ipPool
 	// anyL3 is set once any L3 user registers; relayL3 checks it first so
 	// non-L3 deployments pay one atomic load per packet instead of the
 	// destination-IP parse plus registry lookup.
@@ -151,10 +196,9 @@ type sessionRegistry struct {
 
 func newSessionRegistry(pool *ipPool) *sessionRegistry {
 	return &sessionRegistry{
-		bySID:      make(map[[32]byte]*ocSession),
-		byClientIP: make(map[string]*ocSession),
-		byVirtIP:   make(map[netip.Addr]*ocSession),
-		pool:       pool,
+		bySID:    make(map[[32]byte]*ocSession),
+		byVirtIP: make(map[netip.Addr]*ocSession),
+		pool:     pool,
 	}
 }
 
@@ -188,9 +232,6 @@ func (r *sessionRegistry) create(clientIP string, user *User, l3 bool) (*ocSessi
 	}
 	r.mu.Lock()
 	r.bySID[sess.sid] = sess
-	if clientIP != "" {
-		r.byClientIP[clientIP] = sess
-	}
 	r.byVirtIP[sess.ip] = sess
 	r.mu.Unlock()
 	return sess, nil
@@ -200,12 +241,6 @@ func (r *sessionRegistry) getBySID(sid [32]byte) *ocSession {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.bySID[sid]
-}
-
-func (r *sessionRegistry) getByClientIP(ip string) *ocSession {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.byClientIP[ip]
 }
 
 // getByVirtIP resolves the session owning a virtual tunnel IP. It attributes
@@ -223,15 +258,50 @@ func (r *sessionRegistry) count() int {
 	return len(r.bySID)
 }
 
-// remove drops a session and releases its dynamic IP. Secondary indexes are
-// conditional: two sessions may share a static virtual IP or a NAT client IP,
-// and removing the older one must not clobber the successor's entries.
+// countConnected returns the number of sessions with a live tunnel. That is
+// what max_clients bounds: a session inside its resume window without a tunnel
+// holds an IP lease, not a client slot.
+func (r *sessionRegistry) countConnected() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, sess := range r.bySID {
+		if sess.isConnected() {
+			n++
+		}
+	}
+	return n
+}
+
+// supersedeStale drops every session of user that has no live tunnel and
+// returns how many. A cookie-less reconnect loop (app restart, VPN toggle, lost
+// cookie, changed source address) otherwise leaves one zombie per attempt, each
+// holding a dynamic IP for the whole cookie window. Keyed by user rather than
+// by source address: behind a NAT one address belongs to several users, and a
+// mobile client changes it on every attempt. Only sessions whose tunnel is down
+// are touched, so a second connected device is never affected; a second idle
+// device loses its resume cookie and authenticates again.
+func (r *sessionRegistry) supersedeStale(ctx context.Context, user string) int {
+	r.mu.RLock()
+	var stale []*ocSession
+	for _, sess := range r.bySID {
+		if sess.userName() == user && !sess.isConnected() {
+			stale = append(stale, sess)
+		}
+	}
+	r.mu.RUnlock()
+	for _, sess := range stale {
+		r.remove(ctx, sess, "superseded by re-auth for the same user")
+	}
+	return len(stale)
+}
+
+// remove drops a session and releases its dynamic IP. The virtual-IP index is
+// updated conditionally: two sessions of one user may share a static virtual
+// IP, and removing the older one must not clobber the successor's entry.
 func (r *sessionRegistry) remove(ctx context.Context, sess *ocSession, reason string) {
 	r.mu.Lock()
 	delete(r.bySID, sess.sid)
-	if r.byClientIP[sess.clientIP] == sess {
-		delete(r.byClientIP, sess.clientIP)
-	}
 	if r.byVirtIP[sess.ip] == sess {
 		delete(r.byVirtIP, sess.ip)
 	}
@@ -252,9 +322,6 @@ func (r *sessionRegistry) sweep(ctx context.Context, cookieTimeout time.Duration
 		if sess.expired(now, cookieTimeout) {
 			dead = append(dead, sess)
 			delete(r.bySID, sid)
-			if r.byClientIP[sess.clientIP] == sess {
-				delete(r.byClientIP, sess.clientIP)
-			}
 			if r.byVirtIP[sess.ip] == sess {
 				delete(r.byVirtIP, sess.ip)
 			}

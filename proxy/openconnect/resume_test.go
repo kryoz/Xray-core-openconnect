@@ -203,6 +203,63 @@ func cookieValue(setCookies []string) string {
 	return ""
 }
 
+// ocAuth posts the combined username+password form and returns the status and
+// the session cookie.
+func ocAuth(t *testing.T, s *Server, user, pass string) (int, string) {
+	t.Helper()
+	c := dialOC(t, s)
+	body := `<?xml version="1.0"?><config-auth><auth><username>` + user + `</username><password>` + pass + `</password></auth></config-auth>`
+	writeReq(c, "POST", "/auth", body, "")
+	st, _, setCookies, _ := readResp(t, c)
+	_ = c.Close()
+	return st, cookieValue(setCookies)
+}
+
+// ocTunnel opens a CSTP tunnel for a cookie and returns the status plus the
+// connection and its buffered reader (the tunnel stream).
+func ocTunnel(t *testing.T, s *Server, cookie string) (int, *tls.Conn, *bufio.Reader) {
+	t.Helper()
+	c := dialOC(t, s)
+	writeReq(c, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
+	br := bufio.NewReader(c)
+	setDeadline(t, c, 10*time.Second)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("CONNECT status line: %v", err)
+	}
+	f := strings.Fields(line)
+	if len(f) < 2 {
+		t.Fatalf("bad CONNECT status line: %q", line)
+	}
+	status, err := strconv.Atoi(f[1])
+	if err != nil {
+		t.Fatalf("bad CONNECT status line: %q", line)
+	}
+	for {
+		h, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("CONNECT headers: %v", err)
+		}
+		if h == "\r\n" {
+			break
+		}
+	}
+	return status, c, br
+}
+
+// waitDisconnected blocks until the server has observed the tunnel going down.
+// A fixed sleep here flakes on slow CI.
+func waitDisconnected(t *testing.T, sess *ocSession) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for sess.isConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("server did not observe the tunnel close in time")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestResumePreservesIP drives the full control channel: auth → cookie →
 // CONNECT (IP1) → disconnect → reconnect with cookie → CONNECT (IP2), asserting
 // the IP lease is preserved and no re-authentication is needed.
@@ -315,16 +372,16 @@ func TestResumeExpiredRejects(t *testing.T) {
 	_ = c3.Close()
 }
 
-// TestRegistryRemoveKeepsSuccessor covers two sessions sharing one client IP
-// (static-IP user, or two clients behind one NAT): the old session's removal
-// must not clobber the successor's index entries.
+// TestRegistryRemoveKeepsSuccessor covers two sessions sharing one virtual IP
+// (a static-IP user connecting twice): the old session's removal must not
+// clobber the successor's index entry.
 func TestRegistryRemoveKeepsSuccessor(t *testing.T) {
 	pool, err := newIPPool("10.77.0.0/24")
 	if err != nil {
 		t.Fatalf("pool: %v", err)
 	}
 	r := newSessionRegistry(pool)
-	u := &User{Name: "alice"}
+	u := &User{Name: "alice", Ip: "10.77.0.50"}
 	old, err := r.create("1.2.3.4", u, false)
 	if err != nil {
 		t.Fatalf("create old: %v", err)
@@ -333,13 +390,16 @@ func TestRegistryRemoveKeepsSuccessor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create fresh: %v", err)
 	}
+	if old.ip != fresh.ip {
+		t.Fatalf("static-IP sessions must share one address: got %v and %v", old.ip, fresh.ip)
+	}
 	r.remove(context.Background(), old, "test")
-	if got := r.getByClientIP("1.2.3.4"); got != fresh {
-		t.Fatalf("byClientIP after old remove: want fresh session, got %+v", got)
+	if got := r.getByVirtIP(fresh.ip); got != fresh {
+		t.Fatalf("byVirtIP after old remove: want fresh session, got %+v", got)
 	}
 	r.remove(context.Background(), fresh, "test")
-	if got := r.getByClientIP("1.2.3.4"); got != nil {
-		t.Fatal("byClientIP after fresh remove: want nil")
+	if got := r.getByVirtIP(fresh.ip); got != nil {
+		t.Fatal("byVirtIP after fresh remove: want nil")
 	}
 }
 
@@ -445,9 +505,9 @@ func TestReAuthReplacesZombieSession(t *testing.T) {
 }
 
 // TestReAuthKeepsOtherUsersSession: behind a NAT two users share one peer IP,
-// and byClientIP keeps only the newest session of that peer. A cookie-less
-// re-auth must supersede only its own user's disconnected session — the other
-// user's resume cookie must survive.
+// and the stale-session sweep is keyed by user, not by address. A cookie-less
+// re-auth must supersede only its own user's sessions — the other user's
+// resume cookie must survive.
 func TestReAuthKeepsOtherUsersSession(t *testing.T) {
 	s := newTestServerUsers(t, []*User{
 		{Name: "alice", Password: testPW("pw-a")},
@@ -482,5 +542,104 @@ func TestRegistryCreateRejectsNilUser(t *testing.T) {
 	}
 	if got := r.count(); got != 0 {
 		t.Fatalf("registry count: got %d, want 0", got)
+	}
+}
+
+// TestConnectReplacesPreviousTunnel: a second CONNECT with the same cookie takes
+// over the tunnel (ocserv's worker does the same). The superseded pump must
+// close, must not drop the session's connected state, and must not leave its
+// device writer behind: the replacement tunnel carries traffic.
+func TestConnectReplacesPreviousTunnel(t *testing.T) {
+	s := newTestServer(t)
+	st, cookie := ocAuth(t, s, "testuser", "testpass")
+	if st != 200 || cookie == "" {
+		t.Fatalf("auth: status %d, cookie %q", st, cookie)
+	}
+	sess := s.registry.getBySID(sidFromCookie(t, s, cookie))
+	if sess == nil {
+		t.Fatal("no session registered for cookie")
+	}
+
+	oldC, oldBr := mustTunnel(t, s, cookie)
+	defer func() { _ = oldC.Close() }()
+	if !sess.isConnected() {
+		t.Fatal("first tunnel: session not connected")
+	}
+
+	newC, newBr := mustTunnel(t, s, cookie)
+	defer func() { _ = newC.Close() }()
+
+	// The superseded tunnel is closed by the server.
+	setDeadline(t, oldC, 5*time.Second)
+	if _, err := oldBr.Read(make([]byte, 1)); err == nil {
+		t.Fatal("superseded tunnel still open after the new CONNECT")
+	}
+
+	// The session stays connected through the handover: the replacement owns
+	// the tunnel count and the writer slot.
+	deadline := time.Now().Add(5 * time.Second)
+	for !sess.isConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("session lost its tunnel during the replacement")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	ipReq := buildICMPEchoRequest(sess.ip.AsSlice(), net.IPv4(1, 1, 1, 1), 0x77, 1, []byte("repl"))
+	if _, err := newC.Write(cstFrame(acPKTData, ipReq)); err != nil {
+		t.Fatalf("send data on the replacement tunnel: %v", err)
+	}
+	setDeadline(t, newC, 20*time.Second)
+	if typ, _ := readCstFrame(t, newBr); typ != acPKTData {
+		t.Fatalf("replacement tunnel reply type = %d, want DATA %d", typ, acPKTData)
+	}
+}
+
+// mustTunnel opens a tunnel and fails the test unless the CONNECT was accepted.
+func mustTunnel(t *testing.T, s *Server, cookie string) (*tls.Conn, *bufio.Reader) {
+	t.Helper()
+	st, c, br := ocTunnel(t, s, cookie)
+	if st != 200 {
+		t.Fatalf("CONNECT: status %d, want 200", st)
+	}
+	return c, br
+}
+
+// TestMaxClientsCountsLiveTunnels: max_clients bounds live tunnels, not session
+// records. A session inside its resume window without a tunnel holds an IP
+// lease, so a second client must still get in; once that client's tunnel is up,
+// the limit bites again.
+func TestMaxClientsCountsLiveTunnels(t *testing.T) {
+	s := newTestServerUsers(t, []*User{
+		{Name: "alice", Password: testPW("pw-a")},
+		{Name: "bob", Password: testPW("pw-b")},
+	})
+	s.conf.MaxClients = 1
+
+	stA, cookieA := ocAuth(t, s, "alice", "pw-a")
+	if stA != 200 {
+		t.Fatalf("alice auth: status %d, want 200", stA)
+	}
+	tunA, _ := mustTunnel(t, s, cookieA)
+	sessA := s.registry.getBySID(sidFromCookie(t, s, cookieA))
+	if sessA == nil {
+		t.Fatal("no session for alice")
+	}
+	_ = tunA.Close()
+	waitDisconnected(t, sessA)
+
+	// Alice's session record is still in the registry (resume window), but her
+	// tunnel is down: bob must be admitted.
+	stB, cookieB := ocAuth(t, s, "bob", "pw-b")
+	if stB != 200 {
+		t.Fatalf("bob auth with one disconnected session: status %d, want 200", stB)
+	}
+	tunB, _ := mustTunnel(t, s, cookieB)
+	defer func() { _ = tunB.Close() }()
+
+	// Bob's tunnel is live: the limit applies again.
+	stA2, _ := ocAuth(t, s, "alice", "pw-a")
+	if stA2 != 503 {
+		t.Fatalf("alice re-auth with one live tunnel: status %d, want 503", stA2)
 	}
 }
