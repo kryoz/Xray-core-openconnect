@@ -12,6 +12,7 @@ type OpenConnectUserConfig struct {
 	Routes   []string `json:"routes,omitempty"`
 	Group    string   `json:"group,omitempty"`
 	L3       *bool    `json:"l3,omitempty"`
+	Dtls     *bool    `json:"dtls,omitempty"`
 }
 
 type OpenConnectGroupConfig struct {
@@ -51,6 +52,7 @@ func (c *OpenConnectConfig) Build() (proto.Message, error) {
 			Routes:   c.Users[i].Routes,
 			Group:    c.Users[i].Group,
 			L3:       c.Users[i].L3,
+			Dtls:     c.Users[i].Dtls,
 		}
 	}
 	config.Subnet = c.Subnet

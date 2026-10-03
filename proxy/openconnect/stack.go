@@ -12,6 +12,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/link/qdisc/fifo"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -324,9 +325,10 @@ func (e *ocLinkEndpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.E
 	var n int
 	var downlinkBytes int
 	// One gVisor flush can carry frames for several clients (they share the
-	// NIC), so group by tunnel writer: a batch-capable DTLS writer sends its
-	// frames in one WriteBatch (several records per datagram), CSTP writers
-	// and single-frame drops keep the per-frame path.
+	// NIC), so group by tunnel writer: batch-capable writers (DTLS always;
+	// CSTP only when the client negotiated X-CSTP-Multi-Frame-Capability —
+	// stock clients require one STF frame per TLS record) get one batched
+	// write per flush, everyone else keeps the per-frame path.
 	batches := make(map[*ocWriter][][]byte)
 	for _, pb := range list.AsSlice() {
 		framed, dest := d.frame(pb)
@@ -635,13 +637,17 @@ func createOCStack(ep stack.LinkEndpoint) (*stack.Stack, error) {
 	}
 	gStack := stack.New(opts)
 
-	// Keep the default delegating qdisc (one packet per WritePackets call).
-	// CSTP frames MUST NOT be coalesced into one TLS record: the openconnect
-	// client (cstp.c cstp_mainloop) reads one record at a time and requires
-	// len == 8 + payload_len for the first frame, so a batching qdisc here
-	// makes WritePackets emit several frames per tls.Conn.Write and the client
-	// errors with "Unexpected packet length" / collapses throughput.
-	if err := gStack.CreateNIC(ocNIC, ep); err != nil {
+	// The fifo qdisc feeds WritePackets with whole gVisor flushes (up to 47
+	// packets) instead of one packet per call, which is what makes per-writer
+	// coalescing possible. Coalescing is per-writer and negotiated: only CSTP
+	// sessions that sent X-CSTP-Multi-Frame-Capability in their CONNECT —
+	// stock openconnect requires exactly one STF frame per TLS record — and
+	// the DTLS writer (WriteBatch packs records up to the datagram MTU) get
+	// batched writes; everyone else keeps one frame per write.
+	// ponytail: n=1 = one flush goroutine; a slow client's blocked write can
+	// head-of-line-block other clients on this NIC; raise n if multi-client
+	// throughput shows it.
+	if err := gStack.CreateNICWithOptions(ocNIC, ep, stack.NICOptions{QDisc: fifo.New(ep, 1, 1024)}); err != nil {
 		return nil, errors.New(err.String())
 	}
 	gStack.SetRouteTable([]tcpip.Route{

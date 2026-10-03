@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -294,6 +295,216 @@ func TestCSTPDataBatch(t *testing.T) {
 		}
 		if got := binary.BigEndian.Uint16(reply[24:26]); got != 0x77 {
 			t.Fatalf("reply %d id = %#x, want %#x", i, got, 0x77)
+		}
+		if got := binary.BigEndian.Uint16(reply[26:28]); got != uint16(i) {
+			t.Fatalf("reply %d seq = %d, want %d", i, got, i)
+		}
+	}
+}
+
+// ocConnectMF is ocConnect with the CSTP multi-frame capability header
+// optionally sent in CONNECT; it also asserts the server echoes the
+// capability in the response (its read path is stream-oriented).
+func ocConnectMF(t *testing.T, s *Server, multiFrame bool) (*tls.Conn, *bufio.Reader, *ocSession) {
+	t.Helper()
+	c1 := dialOC(t, s)
+	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>testuser</username></auth></config-auth>`, "")
+	readResp(t, c1)
+	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><password>testpass</password></auth></config-auth>`, "")
+	_, _, setCookies, _ := readResp(t, c1)
+	cookie := cookieValue(setCookies)
+	if cookie == "" {
+		t.Fatalf("no cookie in %v", setCookies)
+	}
+	_ = c1.Close()
+
+	c2 := dialOC(t, s)
+	extra := "Cookie: webvpn=" + cookie + "\r\n"
+	if multiFrame {
+		extra += hdrMultiFrame + ": true\r\n"
+	}
+	writeReq(c2, "CONNECT", "/CSCOSSLC/tunnel", "", extra)
+	br := bufio.NewReader(c2)
+	capability := ""
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read CONNECT head: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+		if k, v, ok := strings.Cut(strings.TrimRight(line, "\r\n"), ":"); ok && strings.EqualFold(strings.TrimSpace(k), hdrMultiFrame) {
+			capability = strings.TrimSpace(v)
+		}
+	}
+	if capability != "true" {
+		t.Errorf("CONNECT response %s = %q, want %q", hdrMultiFrame, capability, "true")
+	}
+	sess := s.registry.getBySID(sidFromCookie(t, s, cookie))
+	if sess == nil {
+		t.Fatal("no session registered for cookie")
+	}
+	return c2, br, sess
+}
+
+// waitTunnelWriter polls the device until the session's tunnel writer is
+// registered (cstpPump installs it right after the CONNECT response).
+func waitTunnelWriter(t *testing.T, s *Server, sess *ocSession) *ocWriter {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.device.mu.RLock()
+		w := s.device.tunnels[sess.ip]
+		s.device.mu.RUnlock()
+		if w != nil {
+			return w
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tunnel writer not registered in time")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestCSTPMultiFrameNegotiation verifies the X-CSTP-Multi-Frame-Capability
+// contract: the batch writer is registered only for sessions that negotiated
+// it, a standard session keeps the per-frame writer, and data flows on both.
+func TestCSTPMultiFrameNegotiation(t *testing.T) {
+	s := newTestServer(t)
+
+	// Standard client: no header → per-frame writer.
+	c, br, sess := ocConnectMF(t, s, false)
+	defer func() { _ = c.Close() }()
+	if w := waitTunnelWriter(t, s, sess); w.batch != nil {
+		t.Error("standard client got a batch writer; want per-frame writes")
+	}
+	ipReq := buildICMPEchoRequest(sess.ip.AsSlice(), net.IPv4(1, 1, 1, 1), 0x99, 1, []byte("mf"))
+	if _, err := c.Write(cstFrame(acPKTData, ipReq)); err != nil {
+		t.Fatalf("send data: %v", err)
+	}
+	setDeadline(t, c, 5*time.Second)
+	if typ, reply := readCstFrame(t, br); typ != acPKTData || len(reply) < 28 || reply[20] != 0 {
+		t.Fatalf("per-frame echo reply: type=%d len=%d", typ, len(reply))
+	}
+
+	// Negotiated client: header → batch writer, data still decodes.
+	c2, br2, sess2 := ocConnectMF(t, s, true)
+	defer func() { _ = c2.Close() }()
+	if w := waitTunnelWriter(t, s, sess2); w.batch == nil {
+		t.Error("negotiated client got no batch writer")
+	}
+	ipReq2 := buildICMPEchoRequest(sess2.ip.AsSlice(), net.IPv4(1, 1, 1, 1), 0x9a, 1, []byte("mf2"))
+	if _, err := c2.Write(cstFrame(acPKTData, ipReq2)); err != nil {
+		t.Fatalf("send data: %v", err)
+	}
+	setDeadline(t, c2, 5*time.Second)
+	if typ, reply := readCstFrame(t, br2); typ != acPKTData || len(reply) < 28 || reply[20] != 0 {
+		t.Fatalf("batched echo reply: type=%d len=%d", typ, len(reply))
+	}
+}
+
+// TestCSTPCoalescerWindow: frames added inside the window leave as one
+// write; nothing more follows until new frames arrive.
+func TestCSTPCoalescerWindow(t *testing.T) {
+	writes := make(chan int, 8)
+	c := &cstpCoalescer{
+		window: 30 * time.Millisecond,
+		max:    1 << 20,
+		write: func(frames [][]byte) error {
+			writes <- len(frames)
+			return nil
+		},
+	}
+	c.add([][]byte{{acPKTData, 1}, {acPKTData, 2}})
+	c.add([][]byte{{acPKTData, 3}})
+	select {
+	case n := <-writes:
+		t.Fatalf("flush before window elapsed: %d frames", n)
+	case <-time.After(10 * time.Millisecond):
+	}
+	if n := <-writes; n != 3 {
+		t.Fatalf("coalesced write = %d frames, want 3", n)
+	}
+	select {
+	case n := <-writes:
+		t.Fatalf("unexpected extra write: %d frames", n)
+	case <-time.After(60 * time.Millisecond):
+	}
+	c.close()
+}
+
+// TestCSTPCoalescerCap: a full buffer flushes synchronously — bursts never
+// wait out the window.
+func TestCSTPCoalescerCap(t *testing.T) {
+	writes := make(chan int, 8)
+	c := &cstpCoalescer{
+		window: time.Hour, // only the cap can flush
+		max:    16,
+		write: func(frames [][]byte) error {
+			writes <- len(frames)
+			return nil
+		},
+	}
+	c.add([][]byte{make([]byte, 10), make([]byte, 10)}) // 9+9 ≥ 16
+	select {
+	case n := <-writes:
+		if n != 2 {
+			t.Fatalf("cap flush = %d frames, want 2", n)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no synchronous flush at cap")
+	}
+	c.close()
+}
+
+// TestCSTPCoalescerClose: close drops pending frames and stops the timer;
+// later adds are dropped silently.
+func TestCSTPCoalescerClose(t *testing.T) {
+	writes := make(chan int, 8)
+	c := &cstpCoalescer{
+		window: time.Hour,
+		max:    1 << 20,
+		write: func(frames [][]byte) error {
+			writes <- len(frames)
+			return nil
+		},
+	}
+	c.add([][]byte{{acPKTData, 1}})
+	c.close()
+	select {
+	case n := <-writes:
+		t.Fatalf("write after close: %d frames", n)
+	case <-time.After(50 * time.Millisecond):
+	}
+	c.add([][]byte{{acPKTData, 2}})
+	select {
+	case n := <-writes:
+		t.Fatalf("write after close+add: %d frames", n)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// TestCSTPMultiFrameCoalescedData drives a burst of requests through a
+// negotiated session: replies may share one TLS write, and the stream parser
+// must decode every frame in order with none lost.
+func TestCSTPMultiFrameCoalescedData(t *testing.T) {
+	s := newTestServer(t)
+	c2, br, sess := ocConnectMF(t, s, true)
+	defer func() { _ = c2.Close() }()
+
+	const n = 5
+	for i := 0; i < n; i++ {
+		ip := buildICMPEchoRequest(sess.ip.AsSlice(), net.IPv4(1, 1, 1, 1), 0x9b, uint16(i), []byte("coal"))
+		if _, err := c2.Write(cstFrame(acPKTData, ip)); err != nil {
+			t.Fatalf("send data %d: %v", i, err)
+		}
+	}
+	setDeadline(t, c2, 5*time.Second)
+	for i := 0; i < n; i++ {
+		typ, reply := readCstFrame(t, br)
+		if typ != acPKTData {
+			t.Fatalf("reply %d type = %d, want DATA", i, typ)
 		}
 		if got := binary.BigEndian.Uint16(reply[26:28]); got != uint16(i) {
 			t.Fatalf("reply %d seq = %d, want %d", i, got, i)

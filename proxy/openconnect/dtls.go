@@ -245,8 +245,10 @@ func (s *Server) startDTLSSession(sess *ocSession, pipe *ocPipe, addr *net.UDPAd
 		_, err := dc.Write(framed)
 		return err
 	}
-	// Batch the frames of one gVisor flush into a single WriteBatch: pion
-	// packs several records into one datagram, cutting a sendto per record.
+	// Batch the frames of one gVisor flush into a single WriteBatch: the
+	// kryoz/pion fork packs several records per datagram but never beyond
+	// the connection MTU, cutting a sendto per record without outer
+	// fragmentation.
 	batchWriter := func(frames [][]byte) error {
 		return dc.WriteBatch(frames)
 	}

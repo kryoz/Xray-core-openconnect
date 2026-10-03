@@ -77,3 +77,40 @@ func TestOpenConnectGroupDTLSJSON(t *testing.T) {
 		},
 	})
 }
+
+// TestOpenConnectUserDTLSJSON verifies the per-user dtls override survives
+// the JSON layer: without the mapping a user-level "dtls": true is silently
+// dropped and the group's dtls:false wins (the 2026-10-03 gate incident).
+func TestOpenConnectUserDTLSJSON(t *testing.T) {
+	no, yes := false, true
+	creator := func() Buildable {
+		return new(OpenConnectConfig)
+	}
+
+	runMultiTestCase(t, []TestCase{
+		{
+			Input: `{
+				"users": [{"name": "alex", "password": "00$00", "group": "mobile", "dtls": true}],
+				"subnet": "10.66.0.0/24",
+				"groups": [{"name": "mobile", "dtls": false}]
+			}`,
+			Parser: loadJSON(creator),
+			Output: &openconnect.OpenConnectInboundConfig{
+				Users:  []*openconnect.User{{Name: "alex", Password: "00$00", Group: "mobile", Dtls: &yes}},
+				Subnet: "10.66.0.0/24",
+				Groups: []*openconnect.Group{{Name: "mobile", Dtls: &no}},
+			},
+		},
+		{
+			Input: `{
+				"users": [{"name": "u", "password": "00$00", "dtls": false}],
+				"subnet": "10.66.0.0/24"
+			}`,
+			Parser: loadJSON(creator),
+			Output: &openconnect.OpenConnectInboundConfig{
+				Users:  []*openconnect.User{{Name: "u", Password: "00$00", Dtls: &no}},
+				Subnet: "10.66.0.0/24",
+			},
+		},
+	})
+}

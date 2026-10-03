@@ -38,6 +38,30 @@ const (
 	cstpKeepalive = 10
 	// gcInterval is how often the session sweeper reaps expired sessions.
 	gcInterval = 30 * time.Second
+	// cstpCoalesceWindow bounds how long a negotiated multi-frame session's
+	// downlink frames wait for more frames before one coalesced TLS write.
+	// The fifo qdisc drains eagerly (a single bulk flow yields 1–2 packets
+	// per WritePackets call), so without a window the batches stay tiny and
+	// the write(2) count barely drops (2026-10-03 profile: write path −44%,
+	// syscalls only −28%). 200µs adds at most one window of latency per
+	// burst and gathers ~10 frames at bulk rates. The earlier 500µs timer
+	// regression was the stock client's framing — this writer is installed
+	// only for sessions that negotiated multi-frame.
+	cstpCoalesceWindow = 200 * time.Microsecond
+	// cstpCoalesceMaxBytes flushes early once the pending buffer holds two
+	// TLS records (2 × 16KiB): under line-rate bursts the cap, not the
+	// timer, drives flushing — near-zero added latency, bounded memory.
+	cstpCoalesceMaxBytes = 32 * 1024
+
+	// hdrMultiFrame is the CSTP multi-frame negotiation header. A client
+	// whose CONNECT carries "X-CSTP-Multi-Frame-Capability: true" parses
+	// several STF frames per TLS record (length-prefixed stream), so the
+	// server coalesces that session's downlink frames into one TLS write;
+	// every other client gets one frame per record, which stock openconnect
+	// (cstp.c cstp_mainloop) requires. The server always answers with the
+	// same header: its read path (readCSTPFrame) is stream-oriented, so
+	// such clients may batch their uplink frames too.
+	hdrMultiFrame = "X-CSTP-Multi-Frame-Capability"
 )
 
 // serverRandomSniffer tees the first server→client TLS flight to capture the
@@ -295,23 +319,28 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq, kl 
 	}
 	sess.setPSK(psk)
 	sess.markConnected()
+	// Multi-frame support is per-connection: each CONNECT (including resume
+	// and rekey) re-negotiates it from the request headers.
+	multiFrame := strings.EqualFold(req.headers["x-cstp-multi-frame-capability"], "true")
 	// Paired with "tunnel closed" from cstpPump: open/close per CSTP
 	// connection, while "session start"/"session end" bracket the whole
 	// cookie lifetime.
-	errors.LogInfo(s.ctx, fmt.Sprintf("openconnect: tunnel open user=%s ip=%s peer=%s appID=%s",
-		sess.userName(), sess.ip, sess.clientIP, sess.appID))
+	errors.LogInfo(s.ctx, fmt.Sprintf("openconnect: tunnel open user=%s ip=%s peer=%s appID=%s multiFrame=%t",
+		sess.userName(), sess.ip, sess.clientIP, sess.appID, multiFrame))
 	// ocserv sends NO body after the blank line; the client reads the rest as
 	// tunnel data. The TCP connection then stays open as the CSTP fallback.
 	_ = writeHTTP(tc, 200, "", s.connectHeaders(sess), "")
-	s.cstpPump(sess, tc, br)
+	s.cstpPump(sess, tc, br, multiFrame)
 }
 
 // stfBatch packs several [acPKTData]+IP frames into one CSTP/TCP buffer, each
-// as an "STF\x1"+len+type frame. Safe ONLY when given a single frame: the
-// openconnect client (cstp.c cstp_mainloop) does one SSL_read and requires
-// len == 8 + payload_len, so several frames in one TLS record produce
-// "Unexpected packet length". The delegating qdisc feeds one packet per
-// WritePackets, keeping this a single-frame path; do not add a batching qdisc.
+// as an "STF\x1"+len+type frame, so a single tls.Conn.Write carries several
+// DATA packets (crypto/tls still splits the buffer into ≤16KiB records; a
+// multi-frame client parses them as a length-prefixed stream). It is
+// installed only for sessions that sent X-CSTP-Multi-Frame-Capability in
+// their CONNECT: the stock openconnect client (cstp.c cstp_mainloop) requires
+// len == 8 + payload_len per SSL_read, and several frames in one TLS record
+// break it with "Unexpected packet length".
 func stfBatch(frames [][]byte) []byte {
 	total := 0
 	for _, f := range frames {
@@ -329,13 +358,88 @@ func stfBatch(frames [][]byte) []byte {
 	return buf
 }
 
+// cstpCoalescer buffers the downlink frames of one negotiated multi-frame
+// CSTP session and flushes them as a single TLS write when the window
+// elapses or the pending buffer reaches max. Timer-fired and synchronous
+// (cap) flushes race safely: pending is swapped under mu, the writer is
+// serialized by the caller's wmu. Write errors are ignored — the pump's
+// read side owns tunnel teardown.
+type cstpCoalescer struct {
+	window time.Duration
+	max    int
+	write  func(frames [][]byte) error
+
+	mu      sync.Mutex
+	pending [][]byte
+	bytes   int
+	timer   *time.Timer
+	closed  bool
+}
+
+// add buffers frames and arms the window (measured from the first pending
+// frame, so latency is bounded); a full buffer flushes synchronously so
+// bursts never wait out the timer.
+func (c *cstpCoalescer) add(frames [][]byte) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.pending = append(c.pending, frames...)
+	for _, f := range frames {
+		c.bytes += len(f) - 1 // IP payload; the acPKTData byte is noise
+	}
+	full := c.bytes >= c.max
+	if c.timer == nil {
+		c.timer = time.AfterFunc(c.window, c.flush)
+	}
+	c.mu.Unlock()
+	if full {
+		c.flush()
+	}
+}
+
+// flush writes and clears the pending frames. Concurrent calls are safe: the
+// loser observes an empty buffer; after close nothing is written.
+func (c *cstpCoalescer) flush() {
+	c.mu.Lock()
+	frames := c.pending
+	c.pending = nil
+	c.bytes = 0
+	if c.timer != nil {
+		c.timer.Stop()
+		c.timer = nil
+	}
+	c.mu.Unlock()
+	if len(frames) > 0 {
+		_ = c.write(frames)
+	}
+}
+
+// close stops the timer and drops pending frames. A flush that already
+// swapped its frames may still write once; a failing write is ignored.
+func (c *cstpCoalescer) close() {
+	c.mu.Lock()
+	c.closed = true
+	c.pending = nil
+	c.bytes = 0
+	if c.timer != nil {
+		c.timer.Stop()
+		c.timer = nil
+	}
+	c.mu.Unlock()
+}
+
 // cstpPump runs the CSTP/TCP channel after CONNECT. It parses STF-framed
 // packets, feeds DATA into the device (for clients without DTLS — CGNAT with
 // UDP blocked — this is the only data path), answers DPD, and mirrors the DTLS
 // liveness machine over TCP: AC_PKT_KEEPALIVE every cstpKeepalive seconds of
 // idle, AC_PKT_DPD_OUT after dpd seconds, teardown after 2×dpd without any
-// frame (ocserv src/worker-vpn.c timers).
-func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
+// frame (ocserv src/worker-vpn.c timers). With multiFrame set (the client
+// negotiated X-CSTP-Multi-Frame-Capability), the downlink frames of one
+// gVisor flush are coalesced into a single TLS write; otherwise each frame is
+// its own TLS record, which stock clients require.
+func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader, multiFrame bool) {
 	// The device writer (gVisor goroutine) and the keepalive/DPD timers below
 	// both write to the TLS connection; crypto/tls does not document
 	// concurrent Write as safe, so serialize frames here.
@@ -354,16 +458,36 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 	deviceWriter := func(framed []byte) error { // device contract: [acPKTData]+ip
 		return writeFrame(acPKTData, framed[1:])
 	}
-	// Batch the DATA frames of one gVisor flush into a single TLS write:
-	// stfBatch concatenates N STF frames and readCSTPFrame decodes them in
-	// order. No timer coalescing across flushes (YAGNI): a 500µs coalesce
-	// timer regressed bulk downloads (Speedtest resets) — the boundary stays
-	// one WritePackets flush.
+	// Coalescing batch writer for negotiated sessions: frames buffer for one
+	// cstpCoalesceWindow (or until two TLS records are pending) and leave as
+	// a single tc.Write — stfBatch concatenates the STF frames and a
+	// multi-frame client decodes them as a stream. The 2026-10-03 profile
+	// showed the fifo qdisc's eager drain keeps per-flush batches at 1–2
+	// frames, so the window is what actually gathers them. Stock sessions
+	// never see this writer: they need one frame per TLS record.
+	var coalescer cstpCoalescer
 	batchWriter := func(frames [][]byte) error {
-		wmu.Lock()
-		defer wmu.Unlock()
-		_, err := tc.Write(stfBatch(frames))
-		return err
+		coalescer.add(frames)
+		return nil
+	}
+	if multiFrame {
+		coalescer.window = cstpCoalesceWindow
+		coalescer.max = cstpCoalesceMaxBytes
+		coalescer.write = func(frames [][]byte) error {
+			wmu.Lock()
+			defer wmu.Unlock()
+			_, err := tc.Write(stfBatch(frames))
+			return err
+		}
+		defer coalescer.close()
+	}
+	// registerCSTP installs this pump as the session's device writer,
+	// batch-capable only when the client negotiated multi-frame support.
+	registerCSTP := func() *ocWriter {
+		if multiFrame {
+			return s.device.registerBatch(sess.ip, deviceWriter, batchWriter)
+		}
+		return s.device.register(sess.ip, deviceWriter)
 	}
 
 	// Registered BEFORE the writer-cleanup defer below so it runs after it
@@ -380,9 +504,14 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 	// defer remove exactly the entry that is live.
 	sess.mu.Lock()
 	sess.cstpWrite = deviceWriter
-	sess.cstpBatch = batchWriter
+	if multiFrame {
+		sess.cstpBatch = batchWriter
+	} else {
+		// nil keeps the DTLS-teardown handback on the per-frame path.
+		sess.cstpBatch = nil
+	}
 	if sess.dtlsConn == nil {
-		sess.dtlsWriter = s.device.registerBatch(sess.ip, deviceWriter, batchWriter)
+		sess.dtlsWriter = registerCSTP()
 	}
 	sess.mu.Unlock()
 	defer func() {
@@ -452,7 +581,7 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader) {
 			sess.mu.Lock()
 			if stale := sess.dtlsConn; stale != nil {
 				sess.dtlsConn = nil
-				sess.dtlsWriter = s.device.registerBatch(sess.ip, deviceWriter, batchWriter)
+				sess.dtlsWriter = registerCSTP()
 				sess.mu.Unlock()
 				// Capture the dead generation's pipe before closing: a newer
 				// generation may register its own pipe in the meantime
@@ -577,6 +706,10 @@ func (s *Server) connectHeaders(sess *ocSession) map[string][]string {
 		"X-CSTP-Keepalive":  {strconv.Itoa(cstpKeepalive)},
 		"X-CSTP-DPD":        {strconv.FormatUint(uint64(dpd), 10)},
 		"X-CSTP-Rekey-Time": {"0"},
+		// Always advertised: readCSTPFrame parses length-prefixed frames
+		// regardless of TLS record boundaries, so multi-frame clients may
+		// batch their uplink frames into one TLS write too.
+		hdrMultiFrame: {"true"},
 	}
 	// DTLS offer is group-gated: omitting the X-DTLS-* headers keeps the
 	// client CSTP-only (ocserv without DTLS behaves the same), for groups
