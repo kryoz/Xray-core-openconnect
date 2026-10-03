@@ -14,7 +14,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/qdisc/fifo"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
-	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
@@ -236,19 +235,14 @@ func (d *ocDevice) relayL3(p ocRxPkt) bool {
 
 func (d *ocDevice) Wait() {}
 
-// ocDestIP extracts the destination IP from an IP packet. The zero netip.Addr
-// (IsValid()==false) means "not parseable" — netip keys avoid the per-packet
-// string allocation of net.IP(...).String().
+// ocDestIP extracts the destination IPv4 from an IPv4 packet. The zero
+// netip.Addr (IsValid()==false) means "not an IPv4 packet we can route" —
+// netip keys avoid the per-packet string allocation of net.IP(...).String().
 func ocDestIP(payload []byte) netip.Addr {
 	if len(payload) >= 20 && payload[0]>>4 == 4 {
 		var a [4]byte
 		copy(a[:], payload[16:20])
 		return netip.AddrFrom4(a)
-	}
-	if len(payload) >= 40 && payload[0]>>4 == 6 {
-		var a [16]byte
-		copy(a[:], payload[24:40])
-		return netip.AddrFrom16(a)
 	}
 	return netip.Addr{}
 }
@@ -305,17 +299,12 @@ func (e *ocLinkEndpoint) Close() {
 	e.Attach(nil)
 }
 
-// ocSrcIP extracts the source IP from an IP packet.
+// ocSrcIP extracts the source IPv4 from an IPv4 packet.
 func ocSrcIP(payload []byte) netip.Addr {
 	if len(payload) >= 20 && payload[0]>>4 == 4 {
 		var a [4]byte
 		copy(a[:], payload[12:16])
 		return netip.AddrFrom4(a)
-	}
-	if len(payload) >= 40 && payload[0]>>4 == 6 {
-		var a [16]byte
-		copy(a[:], payload[8:24])
-		return netip.AddrFrom16(a)
 	}
 	return netip.Addr{}
 }
@@ -378,17 +367,13 @@ func (e *ocLinkEndpoint) dispatchLoop(ctx context.Context, dispatcher stack.Netw
 			e.Attach(nil)
 			return
 		}
-		var proto tcpip.NetworkProtocolNumber
-		switch version {
-		case 4:
-			proto = header.IPv4ProtocolNumber
-		case 6:
-			proto = header.IPv6ProtocolNumber
-		default:
+		// The tunnel is IPv4-only: anything else is dropped here instead of
+		// being built into a PacketBuffer for a stack that has no v6 protocol.
+		if version != 4 {
 			packet.DecRef()
 			continue
 		}
-		dispatcher.DeliverNetworkPacket(proto, packet)
+		dispatcher.DeliverNetworkPacket(header.IPv4ProtocolNumber, packet)
 		packet.DecRef()
 	}
 }
@@ -525,7 +510,6 @@ func (s *ocStack) Start() error {
 	})
 
 	ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber4, s.handleICMPv4)
-	ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber6, s.handleICMPv6)
 
 	s.stack = ipStack
 	return nil
@@ -545,18 +529,12 @@ func (s *ocStack) Close() error {
 	return nil
 }
 
+// handleICMPv4 answers ping locally, mirroring the TUN inbound: gVisor does not
+// forward raw ICMP to the outbound, so an echo request is answered in the stack
+// and written back to the client's tunnel. The tunnel is IPv4-only — the address
+// pool, X-CSTP-Address/Netmask and the split routes are IPv4 — so there is no
+// v6 counterpart.
 func (s *ocStack) handleICMPv4(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
-	return s.handleICMPEchoPacket(header.IPv4ProtocolNumber, id, pkt)
-}
-
-func (s *ocStack) handleICMPv6(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
-	return s.handleICMPEchoPacket(header.IPv6ProtocolNumber, id, pkt)
-}
-
-// handleICMPEchoPacket answers ping locally, mirroring the TUN inbound: gVisor
-// does not forward raw ICMP to the outbound, so an echo request is answered in
-// the stack and written back to the client's tunnel.
-func (s *ocStack) handleICMPEchoPacket(netProto tcpip.NetworkProtocolNumber, id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
 	srcIP := id.RemoteAddress
 	dstIP := id.LocalAddress
 	if srcIP.Len() == 0 || dstIP.Len() == 0 {
@@ -564,59 +542,40 @@ func (s *ocStack) handleICMPEchoPacket(netProto tcpip.NetworkProtocolNumber, id 
 	}
 
 	message := transportPacketBytes(pkt)
-	if _, _, ok := tunicmp.ParseEchoRequest(netProto, message); !ok {
+	if _, _, ok := tunicmp.ParseEchoRequest(header.IPv4ProtocolNumber, message); !ok {
 		return true
 	}
-
-	reply, err := tunicmp.BuildLocalEchoReply(netProto, message, dstIP, srcIP)
+	reply, err := tunicmp.BuildLocalEchoReply(header.IPv4ProtocolNumber, message, dstIP, srcIP)
 	if err != nil {
 		errors.LogInfoInner(s.ctx, err, "openconnect: failed to build local icmp echo reply")
 		return true
 	}
-	if err := s.writeRawICMPPacket(netProto, reply, dstIP, srcIP); err != nil {
+	if err := s.writeRawICMPPacket(reply, dstIP, srcIP); err != nil {
 		errors.LogInfoInner(s.ctx, err, "openconnect: failed to write local icmp echo reply")
 	}
 	return true
 }
 
-func (s *ocStack) writeRawICMPPacket(netProto tcpip.NetworkProtocolNumber, message []byte, srcIP, dstIP tcpip.Address) error {
-	ipHeaderSize := header.IPv6MinimumSize
-	ipProtocol := header.IPv6ProtocolNumber
-	transportProtocol := header.ICMPv6ProtocolNumber
-	if netProto == header.IPv4ProtocolNumber {
-		ipHeaderSize = header.IPv4MinimumSize
-		ipProtocol = header.IPv4ProtocolNumber
-		transportProtocol = header.ICMPv4ProtocolNumber
-	}
-
+// writeRawICMPPacket puts the IPv4 header back on an echo reply and hands it to
+// the stack, which routes it to the client's tunnel.
+func (s *ocStack) writeRawICMPPacket(message []byte, srcIP, dstIP tcpip.Address) error {
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		ReserveHeaderBytes: ipHeaderSize,
+		ReserveHeaderBytes: header.IPv4MinimumSize,
 		Payload:            buffer.MakeWithData(message),
 	})
 	defer pkt.DecRef()
 
-	if netProto == header.IPv4ProtocolNumber {
-		ipHdr := header.IPv4(pkt.NetworkHeader().Push(header.IPv4MinimumSize))
-		ipHdr.Encode(&header.IPv4Fields{
-			TotalLength: uint16(header.IPv4MinimumSize + len(message)),
-			TTL:         64,
-			Protocol:    uint8(transportProtocol),
-			SrcAddr:     srcIP,
-			DstAddr:     dstIP,
-		})
-		ipHdr.SetChecksum(^ipHdr.CalculateChecksum())
-	} else {
-		ipHdr := header.IPv6(pkt.NetworkHeader().Push(header.IPv6MinimumSize))
-		ipHdr.Encode(&header.IPv6Fields{
-			PayloadLength:     uint16(len(message)),
-			TransportProtocol: transportProtocol,
-			HopLimit:          64,
-			SrcAddr:           srcIP,
-			DstAddr:           dstIP,
-		})
-	}
+	ipHdr := header.IPv4(pkt.NetworkHeader().Push(header.IPv4MinimumSize))
+	ipHdr.Encode(&header.IPv4Fields{
+		TotalLength: uint16(header.IPv4MinimumSize + len(message)),
+		TTL:         64,
+		Protocol:    uint8(header.ICMPv4ProtocolNumber),
+		SrcAddr:     srcIP,
+		DstAddr:     dstIP,
+	})
+	ipHdr.SetChecksum(^ipHdr.CalculateChecksum())
 
-	if err := s.stack.WriteRawPacket(ocNIC, ipProtocol, buffer.MakeWithView(pkt.ToView())); err != nil {
+	if err := s.stack.WriteRawPacket(ocNIC, header.IPv4ProtocolNumber, buffer.MakeWithView(pkt.ToView())); err != nil {
 		return errors.New("failed to write raw icmp packet back to stack", err)
 	}
 	return nil
@@ -634,8 +593,10 @@ func transportPacketBytes(pkt *stack.PacketBuffer) []byte {
 // createOCStack configures a gVisor IP stack over the given link endpoint.
 func createOCStack(ep stack.LinkEndpoint) (*stack.Stack, error) {
 	opts := stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
+		// IPv4 only: the pool, X-CSTP-Address/Netmask and the split routes are
+		// IPv4, so a v6 protocol would never see a packet.
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4},
 		HandleLocal:        false,
 	}
 	gStack := stack.New(opts)
@@ -657,7 +618,6 @@ func createOCStack(ep stack.LinkEndpoint) (*stack.Stack, error) {
 	}
 	gStack.SetRouteTable([]tcpip.Route{
 		{Destination: header.IPv4EmptySubnet, NIC: ocNIC},
-		{Destination: header.IPv6EmptySubnet, NIC: ocNIC},
 	})
 	if err := gStack.SetSpoofing(ocNIC, true); err != nil {
 		return nil, errors.New(err.String())

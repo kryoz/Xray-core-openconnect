@@ -160,8 +160,9 @@ func (c *ocUdpConn) SetDeadline(_ time.Time) error {
 func (c *ocUdpConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *ocUdpConn) SetWriteDeadline(_ time.Time) error { return nil }
 
-// writeRawUDPPacket builds a raw UDP/IP packet and injects it into the gVisor
-// stack so the reply reaches the client through the device.
+// writeRawUDPPacket builds a raw UDP/IPv4 packet and injects it into the gVisor
+// stack so the reply reaches the client through the device. The tunnel is
+// IPv4-only, so both flow addresses are always IPv4.
 func (s *ocStack) writeRawUDPPacket(payload []byte, src xnet.Destination, dst xnet.Destination) error {
 	if s.stack == nil {
 		return nil
@@ -170,16 +171,8 @@ func (s *ocStack) writeRawUDPPacket(payload []byte, src xnet.Destination, dst xn
 	srcIP := tcpip.AddrFromSlice(src.Address.IP())
 	dstIP := tcpip.AddrFromSlice(dst.Address.IP())
 
-	isIPv4 := dst.Address.Family().IsIPv4()
-	ipHdrSize := header.IPv6MinimumSize
-	ipProtocol := header.IPv6ProtocolNumber
-	if isIPv4 {
-		ipHdrSize = header.IPv4MinimumSize
-		ipProtocol = header.IPv4ProtocolNumber
-	}
-
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		ReserveHeaderBytes: ipHdrSize + header.UDPMinimumSize,
+		ReserveHeaderBytes: header.IPv4MinimumSize + header.UDPMinimumSize,
 		Payload:            buffer.MakeWithData(payload),
 	})
 	defer pkt.DecRef()
@@ -193,28 +186,17 @@ func (s *ocStack) writeRawUDPPacket(payload []byte, src xnet.Destination, dst xn
 	xsum := header.PseudoHeaderChecksum(header.UDPProtocolNumber, srcIP, dstIP, uint16(udpLen))
 	udpHdr.SetChecksum(^udpHdr.CalculateChecksum(checksum.Checksum(payload, xsum)))
 
-	if isIPv4 {
-		ipHdr := header.IPv4(pkt.NetworkHeader().Push(header.IPv4MinimumSize))
-		ipHdr.Encode(&header.IPv4Fields{
-			TotalLength: uint16(header.IPv4MinimumSize + udpLen),
-			TTL:         64,
-			Protocol:    uint8(header.UDPProtocolNumber),
-			SrcAddr:     srcIP,
-			DstAddr:     dstIP,
-		})
-		ipHdr.SetChecksum(^ipHdr.CalculateChecksum())
-	} else {
-		ipHdr := header.IPv6(pkt.NetworkHeader().Push(header.IPv6MinimumSize))
-		ipHdr.Encode(&header.IPv6Fields{
-			PayloadLength:     uint16(udpLen),
-			TransportProtocol: header.UDPProtocolNumber,
-			HopLimit:          64,
-			SrcAddr:           srcIP,
-			DstAddr:           dstIP,
-		})
-	}
+	ipHdr := header.IPv4(pkt.NetworkHeader().Push(header.IPv4MinimumSize))
+	ipHdr.Encode(&header.IPv4Fields{
+		TotalLength: uint16(header.IPv4MinimumSize + udpLen),
+		TTL:         64,
+		Protocol:    uint8(header.UDPProtocolNumber),
+		SrcAddr:     srcIP,
+		DstAddr:     dstIP,
+	})
+	ipHdr.SetChecksum(^ipHdr.CalculateChecksum())
 
-	if err := s.stack.WriteRawPacket(ocNIC, ipProtocol, buffer.MakeWithView(pkt.ToView())); err != nil {
+	if err := s.stack.WriteRawPacket(ocNIC, header.IPv4ProtocolNumber, buffer.MakeWithView(pkt.ToView())); err != nil {
 		return errors.New("write raw udp packet to stack ", err)
 	}
 	return nil
