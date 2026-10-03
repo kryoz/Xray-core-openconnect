@@ -2,18 +2,15 @@ package openconnect
 
 import (
 	"bufio"
-	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	stderrors "errors"
@@ -24,15 +21,24 @@ import (
 const (
 	// authTimeout bounds how long a control connection may idle during auth.
 	authTimeout = 240 * time.Second
-	// dtlsOverhead is the exact wire cost of one CSTP frame inside a DTLS 1.2
-	// AEAD record: 13 record header + 8 explicit nonce + 16 AEAD tag + 1 CSTP
-	// type byte + 20 IPv4 + 8 UDP. Both the advertised X-CSTP-MTU and the
-	// gVisor NIC MTU are baseMTU - dtlsOverhead, so a maximal IP packet in
+	// cstpOverhead is the exact wire cost of one CSTP frame over the TLS
+	// control channel: 1 CSTP type byte + 5 TLS record header + 16 IV + 16
+	// AEAD tag + 20 TCP + 20 IPv4. Both the advertised X-CSTP-MTU and the
+	// gVisor NIC MTU are baseMTU - cstpOverhead, so a maximal IP packet in
 	// either direction is a datagram of exactly the base MTU: no outer
 	// fragmentation, and the client-side MSS (X-CSTP-MTU - 40) lines up with
 	// the server-side one — sub-MSS incoming segments no longer split into
 	// two datagrams each (the ~1.4x pps anomaly of the 2026-09-27 report).
-	dtlsOverhead = 66
+	cstpOverhead = 78
+
+	// OpenConnect CSTP data-packet types (ocserv src/vpn.h).
+	acPKTData       = 0 // AC_PKT_DATA: raw IP payload
+	acPKTDPDOut     = 3 // AC_PKT_DPD_OUT: dead-peer detection ping
+	acPKTDPDResp    = 4 // AC_PKT_DPD_RESP: DPD reply
+	acPKTDisconnect = 5 // AC_PKT_DISCONNECT: client teardown
+	acPKTKeepalive  = 7 // AC_PKT_KEEPALIVE
+	acPKTCompressed = 8 // AC_PKT_COMPRESSED (unused; we negotiate identity)
+	acPKTTerm       = 9 // AC_PKT_TERM_SERVER: server teardown
 	// cstpKeepalive is the keepalive interval advertised to the client and
 	// used by the server-side CSTP keepalive timer (cstpPump).
 	cstpKeepalive = 10
@@ -64,30 +70,6 @@ const (
 	hdrMultiFrame = "X-CSTP-Multi-Frame-Capability"
 )
 
-// serverRandomSniffer tees the first server→client TLS flight to capture the
-// ServerHello random. Go's tls package does not export the server random, but
-// the DTLS PSK derivation needs it (gnutls_prf seeds with client_random ||
-// server_random).
-type serverRandomSniffer struct {
-	net.Conn
-	// serverRandom is captured once from the first ServerHello flight and
-	// never changes after: an atomic.Pointer keeps the hot Write path free of
-	// a mutex on every packet once the random is already captured.
-	serverRandom atomic.Pointer[[]byte]
-}
-
-// Write captures the random from the first flight, then forwards.
-// Offsets: record header 5 (type+version+length), handshake type+length 4,
-// protocol version 2 → random at 11, 32 bytes.
-func (h *serverRandomSniffer) Write(b []byte) (int, error) {
-	n, err := h.Conn.Write(b)
-	if h.serverRandom.Load() == nil && len(b) >= 43 && b[0] == 0x16 && b[5] == 0x02 {
-		r := append([]byte(nil), b[11:43]...)
-		h.serverRandom.Store(&r)
-	}
-	return n, err
-}
-
 func (s *Server) acceptLoop() {
 	for {
 		raw, err := s.tcpLn.Accept()
@@ -109,35 +91,15 @@ func (s *Server) handleControl(raw net.Conn) {
 	peer := raw.RemoteAddr().String()
 	peerIP := hostFromAddr(raw)
 
-	kl := &keyLog{}
-	sniff := &serverRandomSniffer{Conn: raw}
-	// TLS 1.2 only: the DTLS PSK is derived from the TLS master secret via
-	// the RFC 5705 exporter; Go's KeyLogWriter never exposes the TLS 1.3
-	// exporter_master_secret, so 1.3 sessions cannot yield a PSK.
-	tc := tls.Server(sniff, &tls.Config{
+	tc := tls.Server(raw, &tls.Config{
 		Certificates: []tls.Certificate{s.cert},
-		KeyLogWriter: kl,
 		MinVersion:   tls.VersionTLS12,
-		MaxVersion:   tls.VersionTLS12,
-		// SHA-256-PRF suites only: the DTLS PSK is derived via the RFC 5705
-		// exporter, whose PRF is the negotiated suite's — derivePSK12 hardcodes
-		// P_SHA256, so a SHA-384 suite would silently desync the PSK and push
-		// every such client onto the TCP fallback.
-		CipherSuites: []uint16{
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-		},
 	})
 	if err := tc.HandshakeContext(s.ctx); err != nil {
 		errors.LogDebug(s.ctx, fmt.Sprintf("openconnect: TLS handshake from %s failed: %s", peer, err))
 		return
 	}
 	defer func() { _ = tc.Close() }()
-	if sr := sniff.serverRandom.Load(); sr != nil {
-		kl.setServerRandom(*sr)
-	}
 
 	// One bufio.Reader for the whole control connection: reusing it preserves
 	// any bytes the reader buffered past the current request.
@@ -168,7 +130,7 @@ func (s *Server) handleControl(raw net.Conn) {
 				return
 			}
 		}
-		done := s.dispatch(tc, br, req, peerIP, kl, &pendingUser)
+		done := s.dispatch(tc, br, req, peerIP, &pendingUser)
 		if done {
 			return
 		}
@@ -190,15 +152,15 @@ func (s *Server) rejectCamouflage(tc *tls.Conn) {
 
 // dispatch routes one control request. It returns true when the connection's
 // control phase is over (e.g. after CONNECT, which keeps the socket open).
-func (s *Server) dispatch(tc *tls.Conn, br *bufio.Reader, req *httpReq, peerIP string, kl *keyLog, pending *string) bool {
+func (s *Server) dispatch(tc *tls.Conn, br *bufio.Reader, req *httpReq, peerIP string, pending *string) bool {
 	switch {
 	case (req.method == "GET" || req.method == "POST") && (req.path == "/" || req.path == "/index.html"):
 		// ocserv answers both GET / and the client's initial POST / with the login form.
 		_ = writeHTTP(tc, 200, "text/xml; charset=utf-8", nil, loginForm)
 	case req.method == "POST" && req.path == "/auth":
-		s.handleAuth(tc, req, peerIP, kl, pending)
+		s.handleAuth(tc, req, peerIP, pending)
 	case req.method == "CONNECT":
-		s.handleConnect(tc, br, req, kl)
+		s.handleConnect(tc, br, req)
 		return true
 	default:
 		_ = writeHTTP(tc, 404, "text/plain", nil, "not found")
@@ -206,7 +168,7 @@ func (s *Server) dispatch(tc *tls.Conn, br *bufio.Reader, req *httpReq, peerIP s
 	return false
 }
 
-func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLog, pending *string) {
+func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, pending *string) {
 	if s.limiter.blocked(peerIP) {
 		_ = writeHTTP(tc, 401, "text/xml; charset=utf-8", nil, failMsg)
 		return
@@ -264,28 +226,13 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLo
 		return
 	}
 
-	// The App-ID is an opaque correlation token echoed back in the DTLS
-	// ClientHello: a fresh random value is fine (and better than ocserv's
-	// TLS-session-ID, which Go's TLS 1.2 server never issues anyway).
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		_ = writeHTTP(tc, 500, "text/plain", nil, "internal error")
-		return
-	}
 	u := s.users.userByName(user)
-	sess, err := s.registry.create(hex.EncodeToString(raw), peerIP, u, s.conf.l3For(u))
+	sess, err := s.registry.create(peerIP, u, s.conf.l3For(u))
 	if err != nil {
 		_ = writeHTTP(tc, 500, "text/plain", nil, "internal error")
 		return
 	}
-	psk, err := kl.pskKey()
-	if err != nil {
-		s.registry.remove(s.ctx, sess, "psk derivation failed")
-		_ = writeHTTP(tc, 500, "text/plain", nil, "internal error")
-		return
-	}
-	sess.setPSK(psk)
-	sess.logSessionStart(s.ctx, s.conf.dtlsFor(u))
+	sess.logSessionStart(s.ctx)
 
 	// ocserv sets both webvpncontext (new) and webvpn (legacy); libopenconnect
 	// echoes back "webvpn", so we set both to the same SID.
@@ -296,7 +243,7 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, kl *keyLo
 	_ = writeHTTP(tc, 200, "text/xml; charset=utf-8", map[string][]string{"Set-Cookie": {cookies}}, successMsg)
 }
 
-func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq, kl *keyLog) {
+func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq) {
 	sess := s.sessFromCookie(req.headers["cookie"])
 	if sess == nil {
 		_ = writeHTTP(tc, 401, "text/plain", nil, "unauthorized")
@@ -309,31 +256,22 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq, kl 
 		_ = writeHTTP(tc, 401, "text/plain", nil, "unauthorized")
 		return
 	}
-	// The client re-keyed on a fresh TLS handshake, so re-derive the DTLS PSK
-	// from THIS connection's TLS session, not the stale one. The App-ID is
-	// a server-chosen token and stays stable across resumes.
-	psk, err := kl.pskKey()
-	if err != nil {
-		_ = writeHTTP(tc, 500, "text/plain", nil, "internal error")
-		return
-	}
-	sess.setPSK(psk)
 	sess.markConnected()
 	// Multi-frame support is per-connection: each CONNECT (including resume
 	// and rekey) re-negotiates it from the request headers.
 	multiFrame := strings.EqualFold(req.headers["x-cstp-multi-frame-capability"], "true")
-	// Publish before the CONNECT response: a DTLS session started right
-	// after CONNECT consults sess.multiFrame when registering its writer.
+	// Publish before the CONNECT response: cstpPump consults sess.multiFrame
+	// when registering its writer.
 	sess.mu.Lock()
 	sess.multiFrame = multiFrame
 	sess.mu.Unlock()
 	// Paired with "tunnel closed" from cstpPump: open/close per CSTP
 	// connection, while "session start"/"session end" bracket the whole
 	// cookie lifetime.
-	errors.LogInfo(s.ctx, fmt.Sprintf("openconnect: tunnel open user=%s ip=%s peer=%s appID=%s multiFrame=%t",
-		sess.userName(), sess.ip, sess.clientIP, sess.appID, multiFrame))
+	errors.LogInfo(s.ctx, fmt.Sprintf("openconnect: tunnel open user=%s ip=%s peer=%s multiFrame=%t",
+		sess.userName(), sess.ip, sess.clientIP, multiFrame))
 	// ocserv sends NO body after the blank line; the client reads the rest as
-	// tunnel data. The TCP connection then stays open as the CSTP fallback.
+	// tunnel data. The TCP connection then stays open as the CSTP data channel.
 	_ = writeHTTP(tc, 200, "", s.connectHeaders(sess), "")
 	s.cstpPump(sess, tc, br, multiFrame)
 }
@@ -436,11 +374,10 @@ func (c *cstpCoalescer) close() {
 }
 
 // cstpPump runs the CSTP/TCP channel after CONNECT. It parses STF-framed
-// packets, feeds DATA into the device (for clients without DTLS — CGNAT with
-// UDP blocked — this is the only data path), answers DPD, and mirrors the DTLS
-// liveness machine over TCP: AC_PKT_KEEPALIVE every cstpKeepalive seconds of
-// idle, AC_PKT_DPD_OUT after dpd seconds, teardown after 2×dpd without any
-// frame (ocserv src/worker-vpn.c timers). With multiFrame set (the client
+// packets, feeds DATA into the device, answers DPD, and runs the liveness
+// machine: AC_PKT_KEEPALIVE every cstpKeepalive seconds of idle,
+// AC_PKT_DPD_OUT after dpd seconds, teardown after 2×dpd without any frame
+// (ocserv src/worker-vpn.c timers). With multiFrame set (the client
 // negotiated X-CSTP-Multi-Frame-Capability), the downlink frames of one
 // gVisor flush are coalesced into a single TLS write; otherwise each frame is
 // its own TLS record, which stock clients require.
@@ -502,33 +439,20 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader, multi
 	closeReason := "client closed CSTP"
 	defer func() { sess.logTunnelClosed(s.ctx, closeReason, started) }()
 
-	// Own the device writer unless DTLS already took it over; when DTLS later
-	// tears down, teardownDTLS falls back to this writer. The token is kept
-	// in sess.dtlsWriter — the single "current registration" slot — so every
-	// takeover (DTLS start, CSTP-DATA steal, DTLS-teardown handback) and this
-	// defer remove exactly the entry that is live.
+	// Register the device writer for this tunnel; the defer below removes
+	// exactly the entry this pump installed (two sessions of one user may
+	// share a static virtual IP, so the token is compared, not the slot).
 	sess.mu.Lock()
-	sess.cstpWrite = deviceWriter
-	if multiFrame {
-		sess.cstpBatch = batchWriter
-	} else {
-		// nil keeps the DTLS-teardown handback on the per-frame path.
-		sess.cstpBatch = nil
-	}
-	if sess.dtlsConn == nil {
-		sess.dtlsWriter = registerCSTP()
-	}
+	sess.writer = registerCSTP()
 	sess.mu.Unlock()
 	defer func() {
 		sess.mu.Lock()
-		sess.cstpWrite = nil
-		sess.cstpBatch = nil
-		if sess.dtlsConn == nil {
-			s.device.unregisterIf(sess.ip, sess.dtlsWriter)
-			sess.dtlsWriter = nil
-			sess.connected = false
-			sess.lastDisc = time.Now()
+		if sess.writer != nil {
+			s.device.unregisterIf(sess.ip, sess.writer)
+			sess.writer = nil
 		}
+		sess.connected = false
+		sess.lastDisc = time.Now()
 		sess.mu.Unlock()
 	}()
 
@@ -579,32 +503,6 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader, multi
 				errors.LogWarning(s.ctx, "openconnect: dropping bad data frame from ", sess.ip, " (", len(payload), " bytes)")
 				continue
 			}
-			// Data over TCP while a DTLS tunnel is registered means the
-			// client fell back to CSTP (resume without DTLS, UDP black-holed)
-			// and no longer reads its DTLS socket: take the device writer
-			// back or the tunnel keeps draining relayed packets into it.
-			sess.mu.Lock()
-			if stale := sess.dtlsConn; stale != nil {
-				sess.dtlsConn = nil
-				sess.dtlsWriter = registerCSTP()
-				sess.mu.Unlock()
-				// Capture the dead generation's pipe before closing: a newer
-				// generation may register its own pipe in the meantime
-				// (sess.pipe is guarded by dmuMu, not sess.mu), and dropping
-				// by pointer cannot kill it.
-				s.dmuMu.Lock()
-				stalePipe := sess.pipe
-				s.dmuMu.Unlock()
-				_ = stale.Close()
-				// Drop the dead DTLS pipe or it stays in s.pipes and swallows
-				// the client's next DTLS ClientHello (C3).
-				if stalePipe != nil {
-					s.dropPipe(sess, stalePipe)
-				}
-				errors.LogInfo(s.ctx, "openconnect: CSTP data with live DTLS for ", sess.ip, ", falling back to CSTP writer")
-			} else {
-				sess.mu.Unlock()
-			}
 			// Copy once into a frame [acPKTData]+IP the L3 relay can hand to
 			// the peer tunnel as-is.
 			frame := make([]byte, 1+len(payload))
@@ -631,7 +529,7 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader, multi
 
 // readCSTPFrame reads one STF-framed CSTP packet from the TLS stream. The
 // 8-byte header ("STF\x1", big-endian payload length, type, reserved zero)
-// exists only over TCP; DTLS uses bare 1-byte types. A read deadline that
+// exists only over the TCP channel. A read deadline that
 // fires before the first byte of the frame arrives is returned as a timeout
 // error so the caller can run its keepalive/DPD timers; a timeout or garbage
 // mid-frame returns a non-timeout error — the stream cannot be resynced, so
@@ -699,15 +597,11 @@ func (s *Server) gcLoop() {
 func (s *Server) connectHeaders(sess *ocSession) map[string][]string {
 	baseMTU := s.mtu()
 	dpd := s.dpdSecs()
-	udpPort := int(s.src.Port)
-	if s.conf.DtlsPort != 0 {
-		udpPort = int(s.conf.DtlsPort)
-	}
 	hdrs := map[string][]string{
 		"X-CSTP-Address":    {sess.ip.String()},
 		"X-CSTP-Netmask":    {s.registry.pool.netmask()},
 		"X-CSTP-Base-MTU":   {strconv.FormatUint(uint64(baseMTU), 10)},
-		"X-CSTP-MTU":        {strconv.FormatUint(uint64(baseMTU-dtlsOverhead), 10)},
+		"X-CSTP-MTU":        {strconv.FormatUint(uint64(baseMTU-cstpOverhead), 10)},
 		"X-CSTP-Keepalive":  {strconv.Itoa(cstpKeepalive)},
 		"X-CSTP-DPD":        {strconv.FormatUint(uint64(dpd), 10)},
 		"X-CSTP-Rekey-Time": {"0"},
@@ -715,14 +609,6 @@ func (s *Server) connectHeaders(sess *ocSession) map[string][]string {
 		// regardless of TLS record boundaries, so multi-frame clients may
 		// batch their uplink frames into one TLS write too.
 		hdrMultiFrame: {"true"},
-	}
-	// DTLS offer is group-gated: omitting the X-DTLS-* headers keeps the
-	// client CSTP-only (ocserv without DTLS behaves the same), for groups
-	// where UDP is throttled anyway.
-	if s.conf.dtlsFor(sess.user) {
-		hdrs["X-DTLS-Port"] = []string{strconv.Itoa(udpPort)}
-		hdrs["X-DTLS-App-ID"] = []string{sess.appID}
-		hdrs["X-DTLS-CipherSuite"] = []string{"PSK-NEGOTIATE"}
 	}
 	if len(s.conf.Dns) > 0 {
 		hdrs["X-CSTP-DNS"] = []string{strings.Join(s.conf.Dns, ",")}
@@ -740,7 +626,6 @@ func (s *Server) connectHeaders(sess *ocSession) map[string][]string {
 	if noRoutes := s.conf.noRoutesFor(sess.user); len(noRoutes) > 0 {
 		hdrs["X-CSTP-Split-Exclude"] = noRoutes
 	}
-	// No X-DTLS-Content-Encoding: ocserv omits it when compression is off.
 	return hdrs
 }
 
@@ -773,6 +658,14 @@ func (s *Server) cookieTimeoutSecs() uint32 {
 		return DefaultCookieTimeout
 	}
 	return s.conf.CookieTimeout
+}
+
+// dpdSecs returns the configured DPD interval in seconds (default applied).
+func (s *Server) dpdSecs() uint32 {
+	if s.conf.Dpd == 0 {
+		return DefaultDPD
+	}
+	return s.conf.Dpd
 }
 
 // hostFromAddr extracts the IP (no port) from a connection's remote address.

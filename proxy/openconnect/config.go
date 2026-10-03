@@ -164,11 +164,6 @@ func (c *OpenConnectInboundConfig) validate() error {
 	if c.Mtu != 0 && (c.Mtu < MinMTU || c.Mtu > MaxMTU) {
 		return errors.New("mtu out of range [", MinMTU, ",", MaxMTU, "]: ", c.Mtu)
 	}
-	switch c.Cipher {
-	case "", "auto", "aes128gcm", "chacha20poly1305":
-	default:
-		return errors.New("cipher must be one of auto, aes128gcm, chacha20poly1305: ", c.Cipher)
-	}
 	return nil
 }
 
@@ -215,33 +210,10 @@ func (c *OpenConnectInboundConfig) noRoutesFor(u *User) []string {
 	return nil
 }
 
-// dtlsFor reports whether the DTLS data channel is offered to a user's
-// sessions: the user's own dtls flag when set, otherwise the group's dtls
-// flag, otherwise true (backwards compatible). Note: the generated
-// Group.GetDtls cannot be used here, it returns false for an unset field.
-func (c *OpenConnectInboundConfig) dtlsFor(u *User) bool {
-	if u == nil {
-		return true
-	}
-	// Per-user override wins over the group flag; nil means "not set".
-	if u.Dtls != nil {
-		return *u.Dtls
-	}
-	if u.Group == "" {
-		return true
-	}
-	for _, g := range c.Groups {
-		if g.Name == u.Group {
-			return g.Dtls == nil || *g.Dtls
-		}
-	}
-	return true
-}
-
 // l3For reports whether a user's sessions participate in the L3
 // client↔client relay: the user's own l3 flag when set, otherwise the
-// group's l3 flag, otherwise false. Unlike dtlsFor (opt-out via unset=true),
-// L3 is opt-in: an unset flag anywhere means off.
+// group's l3 flag, otherwise false. L3 is opt-in: an unset flag anywhere
+// means off.
 func (c *OpenConnectInboundConfig) l3For(u *User) bool {
 	if u == nil {
 		return false

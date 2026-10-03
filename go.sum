@@ -40,8 +40,6 @@ github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
 github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk=
 github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
 github.com/kr/text v0.2.0/go.mod h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE=
-github.com/kryoz/dtls/v3 v3.1.9-xray2 h1:KtzRtrA1X/MMrQp6yFo9tkNXmrPGJqi8JqIbM/wpNUc=
-github.com/kryoz/dtls/v3 v3.1.9-xray2/go.mod h1:iKFQNYrjsN2TiA2YKKMqB9MOZaFpjFULBI/A4sW0eyc=
 github.com/libp2p/go-nat v1.0.1-0.20250821073202-01afc089f138 h1:YohuNPT/1k3VcThCQlBZ43PCPWPfMRS1zcxWBF2SLK8=
 github.com/libp2p/go-nat v1.0.1-0.20250821073202-01afc089f138/go.mod h1:TXQg5tfSy+bUjnhT5728j5j/MBj7keIYqqZ1+8k/ui8=
 github.com/libp2p/go-netroute v0.2.1 h1:V8kVrpD8GK0Riv15/7VN6RbUQ3URNZVosw7H2v9tksU=
@@ -52,6 +50,8 @@ github.com/pelletier/go-toml v1.9.5 h1:4yBQzkHv+7BHq2PQUZF3Mx0IYxG7LsP222s7Agd3v
 github.com/pelletier/go-toml v1.9.5/go.mod h1:u1nR/EPcESfeI/szUZKdtJ0xRNbUoANCkoOuaOx1Y+c=
 github.com/phayes/freeport v0.0.0-20180830031419-95f893ade6f2 h1:JhzVVoYvbOACxoUmOs6V/G4D5nPVUW73rKvXxP4XUJc=
 github.com/phayes/freeport v0.0.0-20180830031419-95f893ade6f2/go.mod h1:iIss55rKnNBTvrwdmkUpLnDpZoAHvWaiq5+iMmen4AE=
+github.com/pion/dtls/v3 v3.1.9 h1:rpeycmLIkc4krpk1IxP7+39o11QdCXbmV9+FGi9yZJ8=
+github.com/pion/dtls/v3 v3.1.9/go.mod h1:iKFQNYrjsN2TiA2YKKMqB9MOZaFpjFULBI/A4sW0eyc=
 github.com/pion/logging v0.2.4 h1:tTew+7cmQ+Mc1pTBLKH2puKsOvhm32dROumOZ655zB8=
 github.com/pion/logging v0.2.4/go.mod h1:DffhXTKYdNZU+KtJ5pyQDjvOAh/GsNSyv1lbkFbe3so=
 github.com/pion/stun/v3 v3.1.7 h1:uRXMTlGLf89WgItGNyZ6aR5jMTX0NBbybXADpQCzn+E=

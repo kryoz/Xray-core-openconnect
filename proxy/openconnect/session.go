@@ -13,21 +13,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pion/dtls/v3"
 	"github.com/xtls/xray-core/common/errors"
 )
 
-// ocSession is one authenticated OpenConnect client. The PSK is derived from
-// the TLS control-channel session and used to key the DTLS data channel.
+// ocSession is one authenticated OpenConnect client.
 type ocSession struct {
 	sid      [32]byte
-	appID    string // hex of the TLS session ID, advertised as X-DTLS-App-ID
 	user     *User
 	ip       netip.Addr
 	l3       bool // resolved L3 relay flag (user override → group → false); read on the hot relay path
-	psk      []byte
 	created  time.Time
-	clientIP string // client's real source IP, primary key for UDP demux
+	clientIP string // client's real source IP
 
 	// endOnce guards the single "session end" line: both registry.remove and
 	// the GC sweep can reap the same session.
@@ -36,26 +32,15 @@ type ocSession struct {
 	mu        sync.Mutex
 	connected bool
 	lastDisc  time.Time // last tunnel disconnect; drives cookie/resume TTL
-	// activity is the last DTLS data timestamp (UnixNano). Atomic instead of
-	// under mu: the DTLS read pump stores it on every packet and must not
-	// contend with the control path's dtlsConn/dtlsWriter transactions.
-	activity atomic.Int64
-
-	dtlsConn  *dtls.Conn           // established DTLS data channel (nil until handshake)
-	pipe      *ocPipe              // UDP demux pipe backing the DTLS conn (for NAT rebinding)
-	cstpWrite func([]byte) error   // live CSTP/TCP fallback writer; nil once the TCP conn closes
-	cstpBatch func([][]byte) error // CSTP batch writer; nil once the TCP conn closes
 	// multiFrame records the CONNECT negotiation (X-CSTP-Multi-Frame-
-	// Capability): the client parses several STF frames per TLS record and
-	// several DTLS records per datagram. Set under mu by handleConnect
-	// before the response is written; consulted when the DTLS writer is
-	// registered.
+	// Capability): the client parses several STF frames per TLS record.
+	// Set under mu by handleConnect before the response is written;
+	// consulted when the device writer is registered.
 	multiFrame bool
-	// dtlsWriter is the device writer token this session's live DTLS
-	// generation registered; teardown unregisters it only while it still
-	// owns the slot (two sessions of one user may share a static virtual IP).
-	// Guarded by mu.
-	dtlsWriter *ocWriter
+	// writer is the device writer token this session's live tunnel registered;
+	// teardown unregisters it only while it still owns the slot (two sessions
+	// of one user may share a static virtual IP). Guarded by mu.
+	writer *ocWriter
 }
 
 // userName returns the session's user name, or "-" for an anonymous session.
@@ -68,14 +53,14 @@ func (s *ocSession) userName() string {
 
 // sessionStartLine renders the session-start record. Pure so the field set is
 // pinned by a test: these lines are grepped during incidents.
-func (s *ocSession) sessionStartLine(dtls bool) string {
+func (s *ocSession) sessionStartLine() string {
 	static := s.user != nil && s.user.Ip != ""
 	group := "-"
 	if s.user != nil && s.user.Group != "" {
 		group = s.user.Group
 	}
-	return fmt.Sprintf("openconnect: session start user=%s ip=%s peer=%s group=%s static=%t l3=%t dtls=%t appID=%s",
-		s.userName(), s.ip, s.clientIP, group, static, s.l3, dtls, s.appID)
+	return fmt.Sprintf("openconnect: session start user=%s ip=%s peer=%s group=%s static=%t l3=%t",
+		s.userName(), s.ip, s.clientIP, group, static, s.l3)
 }
 
 // tunnelClosedLine renders the end of one CSTP/TCP tunnel. now is a parameter
@@ -97,8 +82,8 @@ func (s *ocSession) sessionEndLine(reason string, now time.Time) string {
 // every user — static-IP clients included: the address is pinned by config, so
 // the old "CONNECT tunnel ip=..." line alone did not tell an operator which
 // user it belonged to or from which WAN address the client came.
-func (s *ocSession) logSessionStart(ctx context.Context, dtls bool) {
-	errors.LogInfo(ctx, s.sessionStartLine(dtls))
+func (s *ocSession) logSessionStart(ctx context.Context) {
+	errors.LogInfo(ctx, s.sessionStartLine())
 }
 
 // logTunnelClosed reports the end of one CSTP/TCP tunnel. A session can see
@@ -127,37 +112,11 @@ func (s *ocSession) logSessionEnd(ctx context.Context, reason string) {
 	errors.LogInfo(ctx, s.sessionEndLine(reason, time.Now()))
 }
 
-// setPSK stores the derived DTLS PSK for this session. Guarded by s.mu: the
-// control goroutine writes it on auth/CONNECT while the DTLS handshake
-// goroutine reads it via getPSK.
-func (s *ocSession) setPSK(psk []byte) {
-	s.mu.Lock()
-	s.psk = psk
-	s.mu.Unlock()
-}
-
-// getPSK returns the derived DTLS PSK for this session. Guarded by s.mu.
-func (s *ocSession) getPSK() []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.psk
-}
-
 // markConnected records that the tunnel is (re)established.
 func (s *ocSession) markConnected() {
 	s.mu.Lock()
 	s.connected = true
 	s.mu.Unlock()
-}
-
-// touchActivity records the last time DTLS data was received from the client.
-func (s *ocSession) touchActivity() {
-	s.activity.Store(time.Now().UnixNano())
-}
-
-// lastActivity returns the last time DTLS data was received from the client.
-func (s *ocSession) lastActivity() time.Time {
-	return time.Unix(0, s.activity.Load())
 }
 
 // expired reports whether the session's cookie/resume window has elapsed.
@@ -171,15 +130,14 @@ func (s *ocSession) expired(now time.Time, cookieTimeout time.Duration) bool {
 	return now.Sub(s.lastDisc) > cookieTimeout
 }
 
-// sessionRegistry tracks live sessions by SID (cookie), App-ID, and client IP
-// (the primary key for UDP DTLS demux).
+// sessionRegistry tracks live sessions by SID (cookie), client IP, and
+// virtual IP.
 type sessionRegistry struct {
 	// RWMutex: the index maps are read on the per-packet relay path and per
 	// TCP-flow setup, but written only on auth/CONNECT/sweep — readers must
 	// not serialize each other.
 	mu         sync.RWMutex
 	bySID      map[[32]byte]*ocSession
-	byAppID    map[string]*ocSession
 	byClientIP map[string]*ocSession
 	byVirtIP   map[netip.Addr]*ocSession
 	pool       *ipPool
@@ -192,7 +150,6 @@ type sessionRegistry struct {
 func newSessionRegistry(pool *ipPool) *sessionRegistry {
 	return &sessionRegistry{
 		bySID:      make(map[[32]byte]*ocSession),
-		byAppID:    make(map[string]*ocSession),
 		byClientIP: make(map[string]*ocSession),
 		byVirtIP:   make(map[netip.Addr]*ocSession),
 		pool:       pool,
@@ -200,9 +157,8 @@ func newSessionRegistry(pool *ipPool) *sessionRegistry {
 }
 
 // create allocates a session with a fresh SID and a virtual IP.
-func (r *sessionRegistry) create(appID, clientIP string, user *User, l3 bool) (*ocSession, error) {
-	sess := &ocSession{appID: appID, clientIP: clientIP, user: user, l3: l3, created: time.Now(), lastDisc: time.Now()}
-	sess.activity.Store(time.Now().UnixNano())
+func (r *sessionRegistry) create(clientIP string, user *User, l3 bool) (*ocSession, error) {
+	sess := &ocSession{clientIP: clientIP, user: user, l3: l3, created: time.Now(), lastDisc: time.Now()}
 	if user != nil && l3 {
 		r.anyL3.Store(true)
 	}
@@ -224,9 +180,6 @@ func (r *sessionRegistry) create(appID, clientIP string, user *User, l3 bool) (*
 	}
 	r.mu.Lock()
 	r.bySID[sess.sid] = sess
-	if appID != "" {
-		r.byAppID[appID] = sess
-	}
 	if clientIP != "" {
 		r.byClientIP[clientIP] = sess
 	}
@@ -256,12 +209,6 @@ func (r *sessionRegistry) getByVirtIP(ip netip.Addr) *ocSession {
 	return r.byVirtIP[ip]
 }
 
-func (r *sessionRegistry) getByAppID(appID string) *ocSession {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.byAppID[appID]
-}
-
 func (r *sessionRegistry) count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -274,9 +221,6 @@ func (r *sessionRegistry) count() int {
 func (r *sessionRegistry) remove(ctx context.Context, sess *ocSession, reason string) {
 	r.mu.Lock()
 	delete(r.bySID, sess.sid)
-	if r.byAppID[sess.appID] == sess {
-		delete(r.byAppID, sess.appID)
-	}
 	if r.byClientIP[sess.clientIP] == sess {
 		delete(r.byClientIP, sess.clientIP)
 	}
@@ -300,9 +244,6 @@ func (r *sessionRegistry) sweep(ctx context.Context, cookieTimeout time.Duration
 		if sess.expired(now, cookieTimeout) {
 			dead = append(dead, sess)
 			delete(r.bySID, sid)
-			if r.byAppID[sess.appID] == sess {
-				delete(r.byAppID, sess.appID)
-			}
 			if r.byClientIP[sess.clientIP] == sess {
 				delete(r.byClientIP, sess.clientIP)
 			}

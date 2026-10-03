@@ -19,11 +19,10 @@ func TestSessionLogLines(t *testing.T) {
 		user:     &User{Name: "vovan-router", Ip: "172.16.10.198", Group: "splitroute"},
 		ip:       netip.MustParseAddr("172.16.10.198"),
 		clientIP: "203.0.113.7",
-		appID:    "deadbeef",
 		created:  created,
 	}
 
-	start := sess.sessionStartLine(false)
+	start := sess.sessionStartLine()
 	for _, want := range []string{
 		"session start",
 		"user=vovan-router",
@@ -32,8 +31,6 @@ func TestSessionLogLines(t *testing.T) {
 		"group=splitroute",
 		"static=true",
 		"l3=false",
-		"dtls=false",
-		"appID=deadbeef",
 	} {
 		if !strings.Contains(start, want) {
 			t.Errorf("session start line %q missing %q", start, want)
@@ -73,8 +70,8 @@ func TestSessionLogLines(t *testing.T) {
 func TestSessionLogLinesAnonymous(t *testing.T) {
 	sess := &ocSession{ip: netip.MustParseAddr("172.16.10.10"), created: time.Now()}
 
-	start := sess.sessionStartLine(true)
-	for _, want := range []string{"user=-", "group=-", "static=false", "dtls=true"} {
+	start := sess.sessionStartLine()
+	for _, want := range []string{"user=-", "group=-", "static=false"} {
 		if !strings.Contains(start, want) {
 			t.Errorf("anonymous session start line %q missing %q", start, want)
 		}

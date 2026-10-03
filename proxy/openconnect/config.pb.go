@@ -40,11 +40,7 @@ type User struct {
 	// Per-user override: unset falls back to the group's l3 flag (opt-in,
 	// default off), true forces relay on, false forces it off. Pairs without
 	// l3 on both sides keep the regular behavior.
-	L3 *bool `protobuf:"varint,6,opt,name=l3,proto3,oneof" json:"l3,omitempty"`
-	// Per-user DTLS override. Takes precedence over the group's dtls flag:
-	// false forces the CSTP/TCP path, true forces DTLS even when the group
-	// disables it. Unset falls back to the group flag (backwards compatible).
-	Dtls          *bool `protobuf:"varint,7,opt,name=dtls,proto3,oneof" json:"dtls,omitempty"`
+	L3            *bool `protobuf:"varint,6,opt,name=l3,proto3,oneof" json:"l3,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -121,24 +117,11 @@ func (x *User) GetL3() bool {
 	return false
 }
 
-func (x *User) GetDtls() bool {
-	if x != nil && x.Dtls != nil {
-		return *x.Dtls
-	}
-	return false
-}
-
 // Group is a named set of split-routing networks shared by users.
 type Group struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Name   string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Routes []string               `protobuf:"bytes,2,rep,name=routes,proto3" json:"routes,omitempty"`
-	// DTLS data-channel offer for this group's users. When false, the CONNECT
-	// response omits the X-DTLS-* headers and UDP ClientHellos are silently
-	// dropped, keeping the group on the CSTP/TCP path (e.g. mobile carriers
-	// throttling UDP would otherwise cause an endless DTLS↔CSTP ping-pong).
-	// Unset = true (DTLS offered, backwards compatible).
-	Dtls *bool `protobuf:"varint,3,opt,name=dtls,proto3,oneof" json:"dtls,omitempty"`
 	// Split-routing exclusions (IPv4 CIDR) advertised to the client as
 	// X-CSTP-Split-Exclude, mirroring ocserv's no-route directive. With split
 	// routing, no_routes = ["0.0.0.0/0"] tells the client to send everything
@@ -196,13 +179,6 @@ func (x *Group) GetRoutes() []string {
 	return nil
 }
 
-func (x *Group) GetDtls() bool {
-	if x != nil && x.Dtls != nil {
-		return *x.Dtls
-	}
-	return false
-}
-
 func (x *Group) GetNoRoutes() []string {
 	if x != nil {
 		return x.NoRoutes
@@ -233,8 +209,6 @@ type OpenConnectInboundConfig struct {
 	CertFile      string `protobuf:"bytes,7,opt,name=cert_file,json=certFile,proto3" json:"cert_file,omitempty"`
 	KeyFile       string `protobuf:"bytes,8,opt,name=key_file,json=keyFile,proto3" json:"key_file,omitempty"`
 	MaxClients    uint32 `protobuf:"varint,9,opt,name=max_clients,json=maxClients,proto3" json:"max_clients,omitempty"`
-	// UDP (DTLS) listen port. 0 = same as the TCP listen port.
-	DtlsPort uint32 `protobuf:"varint,10,opt,name=dtls_port,json=dtlsPort,proto3" json:"dtls_port,omitempty"`
 	// Split-routing networks (IPv4 CIDR) advertised to the client as
 	// X-CSTP-Split-Include. When set, the client routes only these networks
 	// through the tunnel instead of pulling its default route.
@@ -248,13 +222,7 @@ type OpenConnectInboundConfig struct {
 	// Realm advertised in the 401 WWW-Authenticate header. Empty = plain 404.
 	CamouflageRealm string `protobuf:"bytes,13,opt,name=camouflage_realm,json=camouflageRealm,proto3" json:"camouflage_realm,omitempty"`
 	// Named route groups referenced by User.group.
-	Groups []*Group `protobuf:"bytes,14,rep,name=groups,proto3" json:"groups,omitempty"`
-	// DTLS cipher suite offer. "auto" (default) offers both
-	// TLS_PSK_WITH_AES_128_GCM_SHA256 and TLS_PSK_WITH_CHACHA20_POLY1305_SHA256
-	// and the client picks by its own preference; "aes128gcm" or
-	// "chacha20poly1305" pin one suite (AES-GCM is several times cheaper per
-	// byte on AES-NI hosts).
-	Cipher        string `protobuf:"bytes,15,opt,name=cipher,proto3" json:"cipher,omitempty"`
+	Groups        []*Group `protobuf:"bytes,14,rep,name=groups,proto3" json:"groups,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -352,13 +320,6 @@ func (x *OpenConnectInboundConfig) GetMaxClients() uint32 {
 	return 0
 }
 
-func (x *OpenConnectInboundConfig) GetDtlsPort() uint32 {
-	if x != nil {
-		return x.DtlsPort
-	}
-	return 0
-}
-
 func (x *OpenConnectInboundConfig) GetRoutes() []string {
 	if x != nil {
 		return x.Routes
@@ -387,36 +348,25 @@ func (x *OpenConnectInboundConfig) GetGroups() []*Group {
 	return nil
 }
 
-func (x *OpenConnectInboundConfig) GetCipher() string {
-	if x != nil {
-		return x.Cipher
-	}
-	return ""
-}
-
 var File_proxy_openconnect_config_proto protoreflect.FileDescriptor
 
 const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\n" +
-	"\x1eproxy/openconnect/config.proto\x12\x16xray.proxy.openconnect\"\xb2\x01\n" +
+	"\x1eproxy/openconnect/config.proto\x12\x16xray.proxy.openconnect\"\x90\x01\n" +
 	"\x04User\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12\x0e\n" +
 	"\x02ip\x18\x03 \x01(\tR\x02ip\x12\x16\n" +
 	"\x06routes\x18\x04 \x03(\tR\x06routes\x12\x14\n" +
 	"\x05group\x18\x05 \x01(\tR\x05group\x12\x13\n" +
-	"\x02l3\x18\x06 \x01(\bH\x00R\x02l3\x88\x01\x01\x12\x17\n" +
-	"\x04dtls\x18\a \x01(\bH\x01R\x04dtls\x88\x01\x01B\x05\n" +
-	"\x03_l3B\a\n" +
-	"\x05_dtls\"\x8e\x01\n" +
+	"\x02l3\x18\x06 \x01(\bH\x00R\x02l3\x88\x01\x01B\x05\n" +
+	"\x03_l3\"l\n" +
 	"\x05Group\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
-	"\x06routes\x18\x02 \x03(\tR\x06routes\x12\x17\n" +
-	"\x04dtls\x18\x03 \x01(\bH\x00R\x04dtls\x88\x01\x01\x12\x1b\n" +
+	"\x06routes\x18\x02 \x03(\tR\x06routes\x12\x1b\n" +
 	"\tno_routes\x18\x04 \x03(\tR\bnoRoutes\x12\x13\n" +
-	"\x02l3\x18\x05 \x01(\bH\x01R\x02l3\x88\x01\x01B\a\n" +
-	"\x05_dtlsB\x05\n" +
-	"\x03_l3\"\xf8\x03\n" +
+	"\x02l3\x18\x05 \x01(\bH\x00R\x02l3\x88\x01\x01B\x05\n" +
+	"\x03_l3\"\xc3\x03\n" +
 	"\x18OpenConnectInboundConfig\x122\n" +
 	"\x05users\x18\x01 \x03(\v2\x1c.xray.proxy.openconnect.UserR\x05users\x12\x16\n" +
 	"\x06subnet\x18\x02 \x01(\tR\x06subnet\x12\x10\n" +
@@ -427,14 +377,11 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\tcert_file\x18\a \x01(\tR\bcertFile\x12\x19\n" +
 	"\bkey_file\x18\b \x01(\tR\akeyFile\x12\x1f\n" +
 	"\vmax_clients\x18\t \x01(\rR\n" +
-	"maxClients\x12\x1b\n" +
-	"\tdtls_port\x18\n" +
-	" \x01(\rR\bdtlsPort\x12\x16\n" +
+	"maxClients\x12\x16\n" +
 	"\x06routes\x18\v \x03(\tR\x06routes\x12+\n" +
 	"\x11camouflage_secret\x18\f \x01(\tR\x10camouflageSecret\x12)\n" +
 	"\x10camouflage_realm\x18\r \x01(\tR\x0fcamouflageRealm\x125\n" +
-	"\x06groups\x18\x0e \x03(\v2\x1d.xray.proxy.openconnect.GroupR\x06groups\x12\x16\n" +
-	"\x06cipher\x18\x0f \x01(\tR\x06cipherBd\n" +
+	"\x06groups\x18\x0e \x03(\v2\x1d.xray.proxy.openconnect.GroupR\x06groupsBd\n" +
 	"\x1acom.xray.proxy.openconnectP\x01Z+github.com/xtls/xray-core/proxy/openconnect\xaa\x02\x16Xray.Proxy.OpenConnectb\x06proto3"
 
 var (

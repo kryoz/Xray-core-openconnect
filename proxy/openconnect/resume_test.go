@@ -64,7 +64,6 @@ func boolP(v bool) *bool { return &v }
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	tcpPort := freePort(t, "tcp")
-	udpPort := freePort(t, "udp")
 
 	conf := &OpenConnectInboundConfig{
 		Users:         []*User{{Name: "testuser", Password: testPW("testpass")}},
@@ -72,7 +71,6 @@ func newTestServer(t *testing.T) *Server {
 		Mtu:           1400,
 		Dpd:           90,
 		CookieTimeout: 300,
-		DtlsPort:      uint32(udpPort),
 	}
 	pool, err := newIPPool(conf.Subnet)
 	if err != nil {
@@ -102,7 +100,6 @@ func newTestServer(t *testing.T) *Server {
 
 		stack:  stack,
 		device: stack.device,
-		pipes:  make(map[string]*ocPipe),
 	}
 	if err := s.Start(); err != nil {
 		t.Fatalf("start: %v", err)
@@ -321,20 +318,17 @@ func TestRegistryRemoveKeepsSuccessor(t *testing.T) {
 	}
 	r := newSessionRegistry(pool)
 	u := &User{Name: "alice"}
-	old, err := r.create("app-old", "1.2.3.4", u, false)
+	old, err := r.create("1.2.3.4", u, false)
 	if err != nil {
 		t.Fatalf("create old: %v", err)
 	}
-	fresh, err := r.create("app-new", "1.2.3.4", u, false)
+	fresh, err := r.create("1.2.3.4", u, false)
 	if err != nil {
 		t.Fatalf("create fresh: %v", err)
 	}
 	r.remove(context.Background(), old, "test")
 	if got := r.getByClientIP("1.2.3.4"); got != fresh {
 		t.Fatalf("byClientIP after old remove: want fresh session, got %+v", got)
-	}
-	if got := r.getByAppID("app-new"); got != fresh {
-		t.Fatal("successor byAppID lost")
 	}
 	r.remove(context.Background(), fresh, "test")
 	if got := r.getByClientIP("1.2.3.4"); got != nil {
@@ -351,7 +345,7 @@ func TestRegistryByVirtIP(t *testing.T) {
 	}
 	r := newSessionRegistry(pool)
 	user := &User{Name: "alice"}
-	sess, err := r.create("", "1.2.3.4", user, false)
+	sess, err := r.create("1.2.3.4", user, false)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

@@ -25,21 +25,11 @@ message User {
   // default off), true forces relay on, false forces it off. Pairs without
   // l3 on both sides keep the regular behavior.
   optional bool l3 = 6;
-  // Per-user DTLS override. Takes precedence over the group's dtls flag:
-  // false forces the CSTP/TCP path, true forces DTLS even when the group
-  // disables it. Unset falls back to the group flag (backwards compatible).
-  optional bool dtls = 7;
 }
 // Group is a named set of split-routing networks shared by users.
 message Group {
   string name = 1;
   repeated string routes = 2;
-  // DTLS data-channel offer for this group's users. When false, the CONNECT
-  // response omits the X-DTLS-* headers and UDP ClientHellos are silently
-  // dropped, keeping the group on the CSTP/TCP path (e.g. mobile carriers
-  // throttling UDP would otherwise cause an endless DTLS↔CSTP ping-pong).
-  // Unset = true (DTLS offered, backwards compatible).
-  optional bool dtls = 3;
   // Split-routing exclusions (IPv4 CIDR) advertised to the client as
   // X-CSTP-Split-Exclude, mirroring ocserv's no-route directive. With split
   // routing, no_routes = ["0.0.0.0/0"] tells the client to send everything
@@ -66,8 +56,6 @@ message OpenConnectInboundConfig {
   string cert_file = 7;
   string key_file = 8;
   uint32 max_clients = 9;
-  // UDP (DTLS) listen port. 0 = same as the TCP listen port.
-  uint32 dtls_port = 10;
   // Split-routing networks (IPv4 CIDR) advertised to the client as
   // X-CSTP-Split-Include. When set, the client routes only these networks
   // through the tunnel instead of pulling its default route.
@@ -82,10 +70,4 @@ message OpenConnectInboundConfig {
   string camouflage_realm = 13;
   // Named route groups referenced by User.group.
   repeated Group groups = 14;
-  // DTLS cipher suite offer. "auto" (default) offers both
-  // TLS_PSK_WITH_AES_128_GCM_SHA256 and TLS_PSK_WITH_CHACHA20_POLY1305_SHA256
-  // and the client picks by its own preference; "aes128gcm" or
-  // "chacha20poly1305" pin one suite (AES-GCM is several times cheaper per
-  // byte on AES-NI hosts).
-  string cipher = 15;
 }

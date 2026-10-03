@@ -20,9 +20,9 @@ import (
 	"github.com/xtls/xray-core/transport/internet/stat"
 )
 
-// Server is the OpenConnect inbound. It owns a TCP control-channel listener and
-// a UDP DTLS data-channel listener, bound directly (like the wireguard inbound),
-// bypassing the Xray stream-security layer.
+// Server is the OpenConnect inbound. It owns a TCP control-channel listener,
+// bound directly (like the wireguard inbound), bypassing the Xray stream-security
+// layer.
 type Server struct {
 	conf          *OpenConnectInboundConfig
 	ctx           context.Context
@@ -40,14 +40,11 @@ type Server struct {
 
 	stack  *ocStack
 	device *ocDevice
-	pipes  map[string]*ocPipe
-	dmuMu  sync.Mutex
 
 	cancel context.CancelFunc
 
 	mu    sync.Mutex
 	tcpLn net.Listener
-	udpLn net.PacketConn
 }
 
 // NewServer builds an OpenConnect inbound from its config.
@@ -101,7 +98,7 @@ func NewServer(ctx context.Context, conf *OpenConnectInboundConfig) (*Server, er
 	sCtx, cancel := context.WithCancel(bg)
 
 	// The advertised base MTU must not exceed the link it is sent over:
-	// every downlink DTLS datagram is base-MTU sized at maximum, so a larger
+	// every downlink tunnel packet is base-MTU sized at maximum, so a larger
 	// base than the interface MTU fragments every packet (overlay/tunnel
 	// hosts). 0 = unresolvable (wildcard listen) → keep the configured value.
 	baseMTU := mtuOf(conf)
@@ -148,7 +145,6 @@ func NewServer(ctx context.Context, conf *OpenConnectInboundConfig) (*Server, er
 
 		stack:   stack,
 		device:  stack.device,
-		pipes:   make(map[string]*ocPipe),
 		baseMTU: baseMTU,
 	}
 	return server, nil
@@ -172,12 +168,12 @@ func (s *Server) mtu() uint32 {
 	return mtuOf(s.conf)
 }
 
-// dataMTUOf returns the DTLS data-plane MTU: the base MTU minus the DTLS
+// dataMTUOf returns the tunnel data-plane MTU: the base MTU minus the CSTP
 // tunnel overhead. It is the gVisor NIC MTU, so outgoing IP packets always fit
-// the DTLS tunnel without exceeding the client's receive window.
+// the tunnel without exceeding the client's receive window.
 func dataMTUOf(base uint32) uint32 {
-	if base > dtlsOverhead {
-		return base - dtlsOverhead
+	if base > cstpOverhead {
+		return base - cstpOverhead
 	}
 	return base
 }
@@ -217,8 +213,7 @@ func (*Server) Process(ctx context.Context, network net.Network, conn stat.Conne
 	return nil
 }
 
-// Start implements common.Runnable. Binds the TCP control listener and the UDP
-// DTLS listener.
+// Start implements common.Runnable. Binds the TCP control listener.
 func (s *Server) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -235,28 +230,14 @@ func (s *Server) Start() error {
 		return errors.New("failed to listen on TCP ").Base(err)
 	}
 
-	udpPort := int(s.src.Port)
-	if s.conf.DtlsPort != 0 {
-		udpPort = int(s.conf.DtlsPort)
-	}
-	udpAddr := &net.UDPAddr{IP: s.src.Address.IP(), Port: udpPort}
-	udpLn, err := internet.ListenSystemPacket(s.ctx, udpAddr, nil)
-	if err != nil {
-		_ = tcpLn.Close()
-		return errors.New("failed to listen on UDP ").Base(err)
-	}
-
 	if err := s.stack.Start(); err != nil {
 		_ = tcpLn.Close()
-		_ = udpLn.Close()
 		return errors.New("start gVisor stack ").Base(err)
 	}
 
 	s.tcpLn = tcpLn
-	s.udpLn = udpLn
 	go s.acceptLoop()
 	go s.gcLoop()
-	go s.udpLoop()
 	return nil
 }
 
@@ -265,17 +246,12 @@ func (s *Server) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var err error
-	// The listener fields are deliberately not nil'ed here: acceptLoop, udpLoop
-	// and startDTLSSession read them without s.mu, and the fields are written
-	// exactly once in Start (before those goroutines are spawned). Nil-ing them
-	// would introduce a shutdown-time data race and a possible nil.Accept().
+	// The listener fields are deliberately not nil'ed here: acceptLoop reads
+	// them without s.mu, and the fields are written exactly once in Start
+	// (before those goroutines are spawned). Nil-ing them would introduce a
+	// shutdown-time data race and a possible nil.Accept().
 	if s.tcpLn != nil {
 		err = s.tcpLn.Close()
-	}
-	if s.udpLn != nil {
-		if e := s.udpLn.Close(); e != nil && err == nil {
-			err = e
-		}
 	}
 	if s.stack != nil {
 		if e := s.stack.Close(); e != nil && err == nil {

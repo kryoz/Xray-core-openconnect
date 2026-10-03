@@ -3,7 +3,6 @@ package openconnect
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"net"
@@ -12,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pion/dtls/v3"
 	"github.com/xtls/xray-core/features/stats"
 )
 
@@ -52,253 +50,6 @@ func buildICMPEchoRequest(src, dst net.IP, id, seq uint16, payload []byte) []byt
 	return append(ip, icmp...)
 }
 
-// TestDTLSDataPath drives the full in-process data path: control-channel auth →
-// DTLS handshake (PSK) → ICMP echo request → gVisor local echo reply → back
-// through the DTLS tunnel. It exercises the UDP demux, read pump framing, gVisor
-// ICMP handler, and device write path without needing the dispatcher or a real
-// openconnect client.
-func TestDTLSDataPath(t *testing.T) {
-	s := newTestServer(t)
-
-	// 1. Control channel: authenticate and CONNECT to create the session + PSK.
-	c1 := dialOC(t, s)
-	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>testuser</username></auth></config-auth>`, "")
-	readResp(t, c1)
-	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><password>testpass</password></auth></config-auth>`, "")
-	_, _, setCookies, _ := readResp(t, c1)
-	cookie := cookieValue(setCookies)
-	if cookie == "" {
-		t.Fatalf("no webvpn cookie in %v", setCookies)
-	}
-	_ = c1.Close()
-
-	c2 := dialOC(t, s)
-	writeReq(c2, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
-	if st, hdrs, _, _ := readResp(t, c2); st != 200 {
-		t.Fatalf("CONNECT: status %d", st)
-	} else if hdrs["x-cstp-address"] == "" {
-		t.Fatalf("CONNECT: missing X-CSTP-Address")
-	}
-	defer func() { _ = c2.Close() }()
-
-	sess := s.registry.getByClientIP("127.0.0.1")
-	if sess == nil {
-		t.Fatal("no session registered for client IP")
-	}
-	psk := sess.getPSK()
-	if len(psk) != 32 {
-		t.Fatalf("PSK length = %d, want 32", len(psk))
-	}
-
-	// 2. DTLS client handshake against the server's UDP port.
-	udpAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(s.conf.DtlsPort)}
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen udp: %v", err)
-	}
-	defer func() { _ = pc.Close() }()
-
-	dc, err := dtls.ClientWithOptions(pc, udpAddr,
-		dtls.WithPSK(func(_ []byte) ([]byte, error) { return psk, nil }),
-		dtls.WithPSKIdentityHint([]byte("psk")),
-		dtls.WithCipherSuites(
-			dtls.TLS_PSK_WITH_AES_128_GCM_SHA256,
-			dtls.TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
-		),
-	)
-	if err != nil {
-		t.Fatalf("dtls client: %v", err)
-	}
-	defer func() { _ = dc.Close() }()
-	if err := dc.HandshakeContext(context.Background()); err != nil {
-		t.Fatalf("dtls handshake: %v", err)
-	}
-
-	// 3. Send a framed ICMP echo request from the client's virtual IP.
-	const (
-		echoID  = 0x1234
-		echoSeq = 1
-	)
-	ipReq := buildICMPEchoRequest(sess.ip.AsSlice(), net.IPv4(1, 1, 1, 1), echoID, echoSeq, []byte("ping"))
-	framed := append([]byte{acPKTData}, ipReq...)
-	if _, err := dc.Write(framed); err != nil {
-		t.Fatalf("dtls write: %v", err)
-	}
-
-	// 4. Read the reply and verify it is a framed ICMP echo reply.
-	_ = dc.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 2048)
-	n, err := dc.Read(buf)
-	if err != nil {
-		t.Fatalf("dtls read: %v", err)
-	}
-	if n < 1 || buf[0] != acPKTData {
-		t.Fatalf("reply type = %d, want %d", buf[0], acPKTData)
-	}
-	reply := buf[1:n]
-	if len(reply) < 28 || reply[0]>>4 != 4 {
-		t.Fatalf("reply is not a valid IPv4 packet (%d bytes)", len(reply))
-	}
-	if reply[9] != 1 || reply[20] != 0 {
-		t.Fatalf("reply is not an ICMP echo reply (proto=%d type=%d)", reply[9], reply[20])
-	}
-	if got := binary.BigEndian.Uint16(reply[24:26]); got != echoID {
-		t.Errorf("echo id = %#x, want %#x", got, echoID)
-	}
-	if got := binary.BigEndian.Uint16(reply[26:28]); got != echoSeq {
-		t.Errorf("echo seq = %d, want %d", got, echoSeq)
-	}
-	if !bytes.Equal(reply[12:16], net.IPv4(1, 1, 1, 1).To4()) {
-		t.Errorf("reply src = %v, want 1.1.1.1", net.IP(reply[12:16]))
-	}
-	if !bytes.Equal(reply[16:20], sess.ip.AsSlice()) {
-		t.Errorf("reply dst = %v, want %s", net.IP(reply[16:20]), sess.ip)
-	}
-}
-
-// TestDTLSMultiFrameWriterGating verifies the DTLS writer honors the
-// multi-frame negotiation: a stock session's DTLS tunnel registers without a
-// batch function (one record per datagram — dtls_mainloop reads one record
-// per poll event), a negotiated session's with one.
-func TestDTLSMultiFrameWriterGating(t *testing.T) {
-	s := newTestServer(t)
-
-	for _, tt := range []struct {
-		name       string
-		multiFrame bool
-	}{
-		{"stock", false},
-		{"negotiated", true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			var c2 *tls.Conn
-			var sess *ocSession
-			if tt.multiFrame {
-				c2, _, sess = ocConnectMF(t, s, true)
-			} else {
-				c2, _, sess = ocConnect(t, s)
-			}
-			defer func() { _ = c2.Close() }()
-
-			udpAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(s.conf.DtlsPort)}
-			pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatalf("listen udp: %v", err)
-			}
-			defer func() { _ = pc.Close() }()
-
-			dc, err := dtls.ClientWithOptions(pc, udpAddr,
-				dtls.WithPSK(func(_ []byte) ([]byte, error) { return sess.getPSK(), nil }),
-				dtls.WithPSKIdentityHint([]byte("psk")),
-				dtls.WithCipherSuites(
-					dtls.TLS_PSK_WITH_AES_128_GCM_SHA256,
-					dtls.TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
-				),
-			)
-			if err != nil {
-				t.Fatalf("dtls client: %v", err)
-			}
-			defer func() { _ = dc.Close() }()
-			if err := dc.HandshakeContext(context.Background()); err != nil {
-				t.Fatalf("dtls handshake: %v", err)
-			}
-
-			// Wait for the server to register this DTLS generation (dtlsConn
-			// is set in the same locked section as the writer), then check
-			// the registered writer's batch capability.
-			deadline := time.Now().Add(5 * time.Second)
-			for {
-				sess.mu.Lock()
-				up := sess.dtlsConn != nil
-				sess.mu.Unlock()
-				if up {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("DTLS not established on the server in time")
-				}
-				time.Sleep(5 * time.Millisecond)
-			}
-			s.device.mu.RLock()
-			w := s.device.tunnels[sess.ip]
-			s.device.mu.RUnlock()
-			if w == nil {
-				t.Fatal("no tunnel writer registered")
-			}
-			if tt.multiFrame && w.batch == nil {
-				t.Error("negotiated session: DTLS writer has no batch function")
-			}
-			if !tt.multiFrame && w.batch != nil {
-				t.Error("stock session: DTLS writer must not batch (one record per datagram)")
-			}
-		})
-	}
-}
-
-// TestDTLSMultiFrameBurst proves the negotiated DTLS path keeps the classic
-// one-byte Cisco framing per record: a burst of echo requests must produce
-// classic-framed replies ([acPKTData]+IP), never STF-framed bytes ("STF"
-// over DTLS is not a thing this server sends — stfBatch is CSTP/TCP-only),
-// regardless of how many records share a datagram (pion's Read returns one
-// record payload per call, so record-layer delimiting is exercised too).
-func TestDTLSMultiFrameBurst(t *testing.T) {
-	s := newTestServer(t)
-	c2, _, sess := ocConnectMF(t, s, true) // negotiated: batch writer active
-	defer func() { _ = c2.Close() }()
-
-	udpAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(s.conf.DtlsPort)}
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen udp: %v", err)
-	}
-	defer func() { _ = pc.Close() }()
-
-	dc, err := dtls.ClientWithOptions(pc, udpAddr,
-		dtls.WithPSK(func(_ []byte) ([]byte, error) { return sess.getPSK(), nil }),
-		dtls.WithPSKIdentityHint([]byte("psk")),
-		dtls.WithCipherSuites(
-			dtls.TLS_PSK_WITH_AES_128_GCM_SHA256,
-			dtls.TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
-		),
-	)
-	if err != nil {
-		t.Fatalf("dtls client: %v", err)
-	}
-	defer func() { _ = dc.Close() }()
-	if err := dc.HandshakeContext(context.Background()); err != nil {
-		t.Fatalf("dtls handshake: %v", err)
-	}
-
-	const n = 3
-	for i := 0; i < n; i++ {
-		ip := buildICMPEchoRequest(sess.ip.AsSlice(), net.IPv4(1, 1, 1, 1), 0x123, uint16(i), []byte("burst"))
-		if _, err := dc.Write(append([]byte{acPKTData}, ip...)); err != nil {
-			t.Fatalf("dtls write %d: %v", i, err)
-		}
-	}
-
-	buf := make([]byte, 2048)
-	got := 0
-	_ = dc.SetReadDeadline(time.Now().Add(5 * time.Second))
-	for got < n {
-		rn, err := dc.Read(buf)
-		if err != nil {
-			t.Fatalf("dtls read %d: %v", got, err)
-		}
-		if rn < 1 || buf[0] != acPKTData {
-			t.Fatalf("reply %d starts with %#x, want classic acPKTData (0) — STF bytes must never appear over DTLS", got, buf[0])
-		}
-		reply := buf[1:rn]
-		if len(reply) < 28 || reply[9] != 1 || reply[20] != 0 {
-			t.Fatalf("reply %d is not an ICMP echo reply (%d bytes)", got, len(reply))
-		}
-		if seq := binary.BigEndian.Uint16(reply[26:28]); seq != uint16(got) {
-			t.Fatalf("reply %d seq = %d, want %d", got, seq, got)
-		}
-		got++
-	}
-}
-
 // fakeCounter is a minimal stats.Counter for test assertions.
 type fakeCounter struct {
 	n int64
@@ -320,15 +71,15 @@ func TestRelayL3(t *testing.T) {
 	uA := &User{Name: "a", Password: testPW("x"), Ip: "10.99.0.10", L3: boolP(true)}
 	uB := &User{Name: "b", Password: testPW("x"), Ip: "10.99.0.11", L3: boolP(true)}
 	uC := &User{Name: "c", Password: testPW("x"), Ip: "10.99.0.12"}
-	sessA, err := reg.create("", "", uA, true)
+	sessA, err := reg.create("", uA, true)
 	if err != nil {
 		t.Fatalf("sessA: %v", err)
 	}
-	sessB, err := reg.create("", "", uB, true)
+	sessB, err := reg.create("", uB, true)
 	if err != nil {
 		t.Fatalf("sessB: %v", err)
 	}
-	sessC, err := reg.create("", "", uC, false)
+	sessC, err := reg.create("", uC, false)
 	if err != nil {
 		t.Fatalf("sessC: %v", err)
 	}
@@ -393,8 +144,8 @@ func TestRelayL3(t *testing.T) {
 	}
 }
 
-// TestL3ClientToClientRelay drives the full path: two l3 users (A on DTLS,
-// B on CSTP/TCP), A's ICMP echo to B's virtual IP is relayed into B's tunnel,
+// TestL3ClientToClientRelay drives the full path: two l3 users (A and B, both
+// on CSTP/TCP), A's ICMP echo to B's virtual IP is relayed into B's tunnel,
 // and B's reply is relayed back to A.
 func TestL3ClientToClientRelay(t *testing.T) {
 	s := newTestServer(t)
@@ -408,134 +159,41 @@ func TestL3ClientToClientRelay(t *testing.T) {
 	}
 	s.users = users
 
-	// A: CONNECT + DTLS tunnel.
-	cA, _, sessA := ocConnectAs(t, s, "l3a", "pass1")
+	// A: CONNECT (CSTP).
+	cA, brA, sessA := ocConnectAs(t, s, "l3a", "pass1")
 	defer func() { _ = cA.Close() }()
-	dc := dialDTLS(t, s, sessA.getPSK())
-	defer func() { _ = dc.Close() }()
 
-	// B: CONNECT (CSTP-only, no DTLS).
+	// B: CONNECT (CSTP).
 	cB, brB, sessB := ocConnectAs(t, s, "l3b", "pass2")
 	defer func() { _ = cB.Close() }()
 
 	// A → B: echo request must arrive framed on B's CSTP tunnel.
 	ipA2B := buildICMPEchoRequest(sessA.ip.AsSlice(), sessB.ip.AsSlice(), 0x4242, 1, []byte("relay"))
-	if _, err := dc.Write(append([]byte{acPKTData}, ipA2B...)); err != nil {
-		t.Fatalf("dtls write: %v", err)
+	if _, err := cA.Write(cstFrame(acPKTData, ipA2B)); err != nil {
+		t.Fatalf("cstp write: %v", err)
 	}
 	setDeadline(t, cB, 5*time.Second)
 	typ, payload := readCstFrame(t, brB)
+	for typ != acPKTData && typ != acPKTDisconnect && typ != acPKTTerm {
+		typ, payload = readCstFrame(t, brB)
+	}
 	if typ != acPKTData || !bytes.Equal(payload, ipA2B) {
 		t.Fatalf("B received type=%d payload=%v, want DATA %v", typ, payload, ipA2B)
 	}
 
-	// B → A: reply relayed back onto A's DTLS tunnel.
+	// B → A: reply relayed back onto A's tunnel.
 	ipB2A := buildICMPEchoRequest(sessB.ip.AsSlice(), sessA.ip.AsSlice(), 0x4242, 1, []byte("relay"))
 	if _, err := cB.Write(cstFrame(acPKTData, ipB2A)); err != nil {
 		t.Fatalf("cstp write: %v", err)
 	}
-	_ = dc.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 2048)
-	n, err := dc.Read(buf)
-	if err != nil {
-		t.Fatalf("dtls read: %v", err)
+	setDeadline(t, cA, 5*time.Second)
+	typ, payload = readCstFrame(t, brA)
+	for typ != acPKTData && typ != acPKTDisconnect && typ != acPKTTerm {
+		typ, payload = readCstFrame(t, brA)
 	}
-	if n < 1 || buf[0] != acPKTData || !bytes.Equal(buf[1:n], ipB2A) {
-		t.Fatalf("A received %v, want DATA %v", buf[:n], ipB2A)
+	if typ != acPKTData || !bytes.Equal(payload, ipB2A) {
+		t.Fatalf("A received type=%d payload=%v, want DATA %v", typ, payload, ipB2A)
 	}
-}
-
-// dialDTLS establishes a client DTLS PSK handshake against the server's UDP
-// port and returns the connection.
-func dialDTLS(t *testing.T, s *Server, psk []byte) *dtls.Conn {
-	t.Helper()
-	udpAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(s.conf.DtlsPort)}
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen udp: %v", err)
-	}
-	dc, err := dtls.ClientWithOptions(pc, udpAddr,
-		dtls.WithPSK(func(_ []byte) ([]byte, error) { return psk, nil }),
-		dtls.WithPSKIdentityHint([]byte("psk")),
-		dtls.WithCipherSuites(
-			dtls.TLS_PSK_WITH_AES_128_GCM_SHA256,
-			dtls.TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
-		),
-	)
-	if err != nil {
-		_ = pc.Close()
-		t.Fatalf("dtls client: %v", err)
-	}
-	if err := dc.HandshakeContext(context.Background()); err != nil {
-		_ = dc.Close()
-		t.Fatalf("dtls handshake: %v", err)
-	}
-	return dc
-}
-
-// TestDTLSReconnectAfterDisconnect verifies that after a DTLS tunnel tears down,
-// a fresh ClientHello starts a new handshake: teardown must drop the pipe, not
-// leave it in s.pipes to swallow the reconnect ClientHello (C3).
-func TestDTLSReconnectAfterDisconnect(t *testing.T) {
-	s := newTestServer(t)
-
-	// Control channel: auth + CONNECT to create the session and PSK.
-	c1 := dialOC(t, s)
-	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>testuser</username></auth></config-auth>`, "")
-	readResp(t, c1)
-	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><password>testpass</password></auth></config-auth>`, "")
-	_, _, setCookies, _ := readResp(t, c1)
-	cookie := cookieValue(setCookies)
-	if cookie == "" {
-		t.Fatalf("no webvpn cookie in %v", setCookies)
-	}
-	_ = c1.Close()
-
-	c2 := dialOC(t, s)
-	writeReq(c2, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
-	if st, _, _, _ := readResp(t, c2); st != 200 {
-		t.Fatalf("CONNECT: status %d", st)
-	}
-	defer func() { _ = c2.Close() }()
-
-	sess := s.registry.getByClientIP("127.0.0.1")
-	if sess == nil {
-		t.Fatal("no session registered for client IP")
-	}
-	psk := sess.getPSK()
-
-	// First DTLS handshake, then a graceful BYE so the server tears down now
-	// (rather than waiting out the DPD deadline).
-	dc1 := dialDTLS(t, s, psk)
-	if _, err := dc1.Write([]byte{acPKTDisconnect}); err != nil {
-		t.Fatalf("send disconnect: %v", err)
-	}
-	_ = dc1.Close()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		sess.mu.Lock()
-		down := sess.dtlsConn == nil
-		sess.mu.Unlock()
-		if down {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("first DTLS session did not tear down in time")
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	s.dmuMu.Lock()
-	pipeDropped := sess.pipe == nil
-	s.dmuMu.Unlock()
-	if !pipeDropped {
-		t.Fatal("session pipe was not dropped after DTLS teardown")
-	}
-
-	// A fresh ClientHello must start a new handshake, not be swallowed by a
-	// stale pipe.
-	dc2 := dialDTLS(t, s, psk)
-	_ = dc2.Close()
 }
 
 // TestConnectSplitRoutes verifies that split-routing networks are advertised
@@ -888,10 +546,9 @@ func readRawHead(t *testing.T, c *tls.Conn) string {
 	}
 }
 
-// TestL3RelayMixedOrderCSTPFirst reproduces the field layout: the CSTP-only
-// user connects first, the DTLS user second (same client IP for both — one
-// NAT), and the CSTP user's failed DTLS attempt (no App-ID in ClientHello,
-// OpenSSL-style) must not disturb the relay in either direction.
+// TestL3RelayMixedOrderCSTPFirst reproduces the field layout: two l3 users
+// behind one NAT (same client IP) connect in sequence; the relay must work in
+// both directions regardless of connection order.
 func TestL3RelayMixedOrderCSTPFirst(t *testing.T) {
 	s := newTestServer(t)
 	s.conf.Users = []*User{
@@ -904,50 +561,20 @@ func TestL3RelayMixedOrderCSTPFirst(t *testing.T) {
 	}
 	s.users = users
 
-	// B (CSTP-only) connects first.
+	// B connects first.
 	cB, brB, sessB := ocConnectAs(t, s, "l3b", "pass2")
 	defer func() { _ = cB.Close() }()
 
-	// A connects second and brings up DTLS (resolves via byClientIP → A).
-	cA, _, sessA := ocConnectAs(t, s, "l3a", "pass1")
+	// A connects second (same client IP as B — one NAT).
+	cA, brA, sessA := ocConnectAs(t, s, "l3a", "pass1")
 	defer func() { _ = cA.Close() }()
-	dc := dialDTLS(t, s, sessA.getPSK())
-	defer func() { _ = dc.Close() }()
 
-	// A failed DTLS attempt with a wrong PSK from the same client IP: the
-	// ClientHello carries no App-ID (pion, like OpenSSL), so it resolves to
-	// the newest session (A) and fails the handshake — mirroring the CSTP
-	// user behind the same NAT trying DTLS. It must leave A's live tunnel
-	// and the relay intact.
-	udpAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(s.conf.DtlsPort)}
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen udp: %v", err)
-	}
-	defer func() { _ = pc.Close() }()
-	bad, err := dtls.ClientWithOptions(pc, udpAddr,
-		dtls.WithPSK(func(_ []byte) ([]byte, error) { return []byte("wrong-psk-wrong-psk-wrong-psk!!"), nil }),
-		dtls.WithPSKIdentityHint([]byte("psk")),
-		dtls.WithCipherSuites(dtls.TLS_PSK_WITH_AES_128_GCM_SHA256),
-	)
-	if err != nil {
-		t.Fatalf("dtls client: %v", err)
-	}
-	hctx, hcancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer hcancel()
-	if err := bad.HandshakeContext(hctx); err == nil {
-		_ = bad.Close()
-		t.Fatal("handshake with wrong PSK unexpectedly succeeded")
-	}
-
-	// Relay must still work both ways across the DTLS/CSTP pair.
+	// A → B.
 	ipA2B := buildICMPEchoRequest(sessA.ip.AsSlice(), sessB.ip.AsSlice(), 0x99, 1, []byte("m"))
-	if _, err := dc.Write(append([]byte{acPKTData}, ipA2B...)); err != nil {
-		t.Fatalf("dtls write: %v", err)
+	if _, err := cA.Write(cstFrame(acPKTData, ipA2B)); err != nil {
+		t.Fatalf("cstp write: %v", err)
 	}
-	// The failed handshake stalls this leg for >10s, so B's idle CSTP timer
-	// emits keepalives first — skip liveness frames until DATA arrives.
-	setDeadline(t, cB, 35*time.Second)
+	setDeadline(t, cB, 5*time.Second)
 	typ, payload := readCstFrame(t, brB)
 	for typ != acPKTData && typ != acPKTDisconnect && typ != acPKTTerm {
 		typ, payload = readCstFrame(t, brB)
@@ -956,118 +583,23 @@ func TestL3RelayMixedOrderCSTPFirst(t *testing.T) {
 		t.Fatalf("B received type=%d payload=%v, want DATA %v", typ, payload, ipA2B)
 	}
 
+	// B → A.
 	ipB2A := buildICMPEchoRequest(sessB.ip.AsSlice(), sessA.ip.AsSlice(), 0x99, 1, []byte("m"))
 	if _, err := cB.Write(cstFrame(acPKTData, ipB2A)); err != nil {
 		t.Fatalf("cstp write: %v", err)
 	}
-	_ = dc.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 2048)
-	n, err := dc.Read(buf)
-	if err != nil {
-		t.Fatalf("dtls read: %v", err)
-	}
-	if n < 1 || buf[0] != acPKTData || !bytes.Equal(buf[1:n], ipB2A) {
-		t.Fatalf("A received %v, want DATA %v", buf[:n], ipB2A)
-	}
-}
-
-// TestRelayAfterResumeWithoutDTLS reproduces the field bug: a client with a
-// live server-side DTLS tunnel reconnects over CSTP (resume, DTLS disabled
-// client-side). The stale DTLS writer must not swallow relayed packets for
-// 2xDPD after the reconnect: CSTP data means the client fell back to TCP.
-func TestRelayAfterResumeWithoutDTLS(t *testing.T) {
-	s := newTestServer(t)
-	s.conf.Users = []*User{
-		{Name: "l3a", Password: testPW("pass1"), Ip: "10.99.0.10", L3: boolP(true)},
-		{Name: "l3b", Password: testPW("pass2"), Ip: "10.99.0.11", L3: boolP(true)},
-	}
-	users, err := newUserStore(s.conf.Users)
-	if err != nil {
-		t.Fatalf("users: %v", err)
-	}
-	s.users = users
-
-	// A: DTLS client.
-	cA, _, sessA := ocConnectAs(t, s, "l3a", "pass1")
-	defer func() { _ = cA.Close() }()
-	dcA := dialDTLS(t, s, sessA.getPSK())
-	defer func() { _ = dcA.Close() }()
-
-	// B: auth once, keep the cookie; CONNECT + DTLS (both channels up).
-	cAuth := dialOC(t, s)
-	writeReq(cAuth, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>l3b</username></auth></config-auth>`, "")
-	readResp(t, cAuth)
-	writeReq(cAuth, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><password>pass2</password></auth></config-auth>`, "")
-	_, _, setCookies, _ := readResp(t, cAuth)
-	cookie := cookieValue(setCookies)
-	if cookie == "" {
-		t.Fatalf("no cookie in %v", setCookies)
-	}
-	_ = cAuth.Close()
-
-	cB1 := dialOC(t, s)
-	writeReq(cB1, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
-	readRawHead(t, cB1)
-	sessB := s.registry.getBySID(sidFromCookie(t, s, cookie))
-	if sessB == nil {
-		t.Fatal("no session for cookie")
-	}
-	dcB := dialDTLS(t, s, sessB.getPSK())
-	_ = dcB // deliberately not closed: the server keeps its DTLS writer alive
-	// NOTE: dcB is deliberately NOT closed: the client walks away from its
-	// DTLS socket (disabled DTLS, reconnect), so the server keeps seeing a
-	// live tunnel and its writer — the exact field condition.
-
-	// B reconnects over CSTP only (resume without DTLS).
-	_ = cB1.Close()
-	cB2 := dialOC(t, s)
-	defer func() { _ = cB2.Close() }()
-	writeReq(cB2, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
-	brB := bufio.NewReader(cB2)
-	for {
-		line, err := brB.ReadString('\n')
-		if err != nil {
-			t.Fatalf("read CONNECT head: %v", err)
-		}
-		if line == "\r\n" {
-			break
-		}
-	}
-
-	// B sends its own traffic over the new CSTP channel (ping to A): this
-	// is the DATA frame that must repossess the device writer from the
-	// stale DTLS tunnel.
-	ipB2A := buildICMPEchoRequest(sessB.ip.AsSlice(), sessA.ip.AsSlice(), 0x51, 1, []byte("r"))
-	if _, err := cB2.Write(cstFrame(acPKTData, ipB2A)); err != nil {
-		t.Fatalf("cstp write: %v", err)
-	}
-	_ = dcA.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 2048)
-	n, err := dcA.Read(buf)
-	if err != nil {
-		t.Fatalf("dtls read: %v", err)
-	}
-	if n < 1 || buf[0] != acPKTData || !bytes.Equal(buf[1:n], ipB2A) {
-		t.Fatalf("A received %v, want DATA", buf[:n])
-	}
-
-	// Now A's reply must reach B over CSTP, not vanish into the stale DTLS.
-	ipA2B := buildICMPEchoRequest(sessA.ip.AsSlice(), sessB.ip.AsSlice(), 0x51, 1, []byte("r"))
-	if _, err := dcA.Write(append([]byte{acPKTData}, ipA2B...)); err != nil {
-		t.Fatalf("dtls write: %v", err)
-	}
-	setDeadline(t, cB2, 5*time.Second)
-	typ, payload := readCstFrame(t, brB)
+	setDeadline(t, cA, 5*time.Second)
+	typ, payload = readCstFrame(t, brA)
 	for typ != acPKTData && typ != acPKTDisconnect && typ != acPKTTerm {
-		typ, payload = readCstFrame(t, brB)
+		typ, payload = readCstFrame(t, brA)
 	}
-	if typ != acPKTData || !bytes.Equal(payload, ipA2B) {
-		t.Fatalf("B received type=%d payload=%v, want DATA", typ, payload)
+	if typ != acPKTData || !bytes.Equal(payload, ipB2A) {
+		t.Fatalf("A received type=%d payload=%v, want DATA %v", typ, payload, ipB2A)
 	}
 }
 
 // TestRelayWriterSurvivesStaleSessionTeardown covers two sessions sharing one
-// static IP: the old session's DTLS teardown must not unregister the new
+// static IP: the old session's CSTP teardown must not unregister the new
 // live session's device writer (fix: unregister only the writer you own).
 func TestRelayWriterSurvivesStaleSessionTeardown(t *testing.T) {
 	s := newTestServer(t)
@@ -1081,52 +613,25 @@ func TestRelayWriterSurvivesStaleSessionTeardown(t *testing.T) {
 	}
 	s.users = users
 
-	// A: DTLS client (the relay source).
+	// A: CSTP client (the relay source).
 	cA, _, sessA := ocConnectAs(t, s, "l3a", "pass1")
 	defer func() { _ = cA.Close() }()
-	dcA := dialDTLS(t, s, sessA.getPSK())
-	defer func() { _ = dcA.Close() }()
 
-	// B generation 1: CSTP + DTLS, then the client walks away (old session
-	// stays "live" server-side until DPD notices).
+	// B generation 1: CONNECT, then the client walks away.
 	cB1, _, sessB1 := ocConnectAs(t, s, "l3b", "pass2")
-	dcB1 := dialDTLS(t, s, sessB1.getPSK())
-	_ = dcB1
 	_ = cB1.Close()
 
-	// B generation 2: fresh auth (new session) on the SAME static IP, CSTP.
+	// B generation 2: fresh auth (new session) on the SAME static IP.
 	cB2, brB, sessB2 := ocConnectAs(t, s, "l3b", "pass2")
 	defer func() { _ = cB2.Close() }()
 	if sessB2 == sessB1 {
 		t.Fatal("expected a distinct session for the second auth")
 	}
 
-	// The old generation's DTLS dies (close_notify arrives late, after the
-	// new session registered its CSTP writer).
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		sessB1.mu.Lock()
-		oldDC := sessB1.dtlsConn
-		sessB1.mu.Unlock()
-		if oldDC != nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Skip("old session DTLS already gone; race in teardown window")
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	sessB1.mu.Lock()
-	oldDC := sessB1.dtlsConn
-	sessB1.mu.Unlock()
-	if err := oldDC.Close(); err != nil && err.Error() != "connection already closed" {
-		t.Logf("old dc close: %v", err)
-	}
-
 	// A -> B must still be relayed to the new session's CSTP writer.
 	ipA2B := buildICMPEchoRequest(sessA.ip.AsSlice(), sessB2.ip.AsSlice(), 0x61, 1, []byte("g2"))
-	if _, err := dcA.Write(append([]byte{acPKTData}, ipA2B...)); err != nil {
-		t.Fatalf("dtls write: %v", err)
+	if _, err := cA.Write(cstFrame(acPKTData, ipA2B)); err != nil {
+		t.Fatalf("cstp write: %v", err)
 	}
 	setDeadline(t, cB2, 5*time.Second)
 	typ, payload := readCstFrame(t, brB)
@@ -1136,74 +641,4 @@ func TestRelayWriterSurvivesStaleSessionTeardown(t *testing.T) {
 	if typ != acPKTData || !bytes.Equal(payload, ipA2B) {
 		t.Fatalf("B received type=%d payload=%v, want DATA", typ, payload)
 	}
-}
-
-// TestTeardownHandbackRemovesWriter covers the DTLS→CSTP writer handback and
-// its cleanup: after DTLS dies with a live CSTP pump, teardownDTLS registers
-// the CSTP writer under a NEW token; when the CSTP connection later closes,
-// the pump's defer must remove exactly that entry. With the old (dropped-token)
-// code the map kept a dead writer forever and every relayed packet drained
-// into a closed tls.Conn.
-func TestTeardownHandbackRemovesWriter(t *testing.T) {
-	s := newTestServer(t)
-
-	// Auth + CONNECT: the CSTP pump owns the device writer.
-	c1 := dialOC(t, s)
-	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><username>testuser</username></auth></config-auth>`, "")
-	readResp(t, c1)
-	writeReq(c1, "POST", "/auth", `<?xml version="1.0"?><config-auth><auth><password>testpass</password></auth></config-auth>`, "")
-	_, _, setCookies, _ := readResp(t, c1)
-	cookie := cookieValue(setCookies)
-	if cookie == "" {
-		t.Fatal("no webvpn cookie")
-	}
-	_ = c1.Close()
-
-	c2 := dialOC(t, s)
-	writeReq(c2, "CONNECT", "/CSCOSSLC/tunnel", "", "Cookie: webvpn="+cookie+"\r\n")
-	if st, _, _, _ := readResp(t, c2); st != 200 {
-		t.Fatalf("CONNECT: status != 200")
-	}
-	sess := s.registry.getByClientIP("127.0.0.1")
-	if sess == nil {
-		t.Fatal("no session")
-	}
-
-	waitFor := func(cond func() bool, what string) {
-		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for !cond() {
-			if time.Now().After(deadline) {
-				t.Fatal(what)
-			}
-			time.Sleep(25 * time.Millisecond)
-		}
-	}
-
-	// DTLS up: the tunnel writer moves to the DTLS connection.
-	dc := dialDTLS(t, s, sess.getPSK())
-	t.Cleanup(func() { _ = dc.Close() })
-	waitFor(func() bool {
-		sess.mu.Lock()
-		defer sess.mu.Unlock()
-		return sess.dtlsConn != nil
-	}, "DTLS not established in time")
-
-	// Graceful DTLS teardown with a live CSTP writer → handback registers the
-	// CSTP writer under a new token.
-	_, _ = dc.Write([]byte{acPKTDisconnect})
-	waitFor(func() bool {
-		sess.mu.Lock()
-		defer sess.mu.Unlock()
-		return sess.dtlsConn == nil
-	}, "DTLS not torn down in time")
-
-	// CSTP closes: the pump's defer must remove the handback registration.
-	_ = c2.Close()
-	waitFor(func() bool {
-		s.device.mu.Lock()
-		defer s.device.mu.Unlock()
-		_, ok := s.device.tunnels[sess.ip]
-		return !ok
-	}, "device writer leaked after CSTP close")
 }

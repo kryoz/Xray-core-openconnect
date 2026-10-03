@@ -12,14 +12,12 @@ type OpenConnectUserConfig struct {
 	Routes   []string `json:"routes,omitempty"`
 	Group    string   `json:"group,omitempty"`
 	L3       *bool    `json:"l3,omitempty"`
-	Dtls     *bool    `json:"dtls,omitempty"`
 }
 
 type OpenConnectGroupConfig struct {
 	Name     string   `json:"name"`
 	Routes   []string `json:"routes"`
 	NoRoutes []string `json:"noRoutes,omitempty"`
-	Dtls     *bool    `json:"dtls,omitempty"`
 	L3       *bool    `json:"l3,omitempty"`
 }
 
@@ -34,11 +32,9 @@ type OpenConnectConfig struct {
 	CertFile         string                   `json:"certFile"`
 	KeyFile          string                   `json:"keyFile"`
 	MaxClients       uint32                   `json:"maxClients"`
-	DtlsPort         uint32                   `json:"dtlsPort"`
 	CamouflageSecret string                   `json:"camouflageSecret,omitempty"`
 	CamouflageRealm  string                   `json:"camouflageRealm,omitempty"`
 	Groups           []OpenConnectGroupConfig `json:"groups,omitempty"`
-	Cipher           string                   `json:"cipher,omitempty"`
 }
 
 func (c *OpenConnectConfig) Build() (proto.Message, error) {
@@ -52,7 +48,6 @@ func (c *OpenConnectConfig) Build() (proto.Message, error) {
 			Routes:   c.Users[i].Routes,
 			Group:    c.Users[i].Group,
 			L3:       c.Users[i].L3,
-			Dtls:     c.Users[i].Dtls,
 		}
 	}
 	config.Subnet = c.Subnet
@@ -64,17 +59,14 @@ func (c *OpenConnectConfig) Build() (proto.Message, error) {
 	config.CertFile = c.CertFile
 	config.KeyFile = c.KeyFile
 	config.MaxClients = c.MaxClients
-	config.DtlsPort = c.DtlsPort
 	config.CamouflageSecret = c.CamouflageSecret
 	config.CamouflageRealm = c.CamouflageRealm
-	config.Cipher = c.Cipher
 	config.Groups = make([]*openconnect.Group, len(c.Groups))
 	for i := range c.Groups {
 		config.Groups[i] = &openconnect.Group{
 			Name:     c.Groups[i].Name,
 			Routes:   c.Groups[i].Routes,
 			NoRoutes: c.Groups[i].NoRoutes,
-			Dtls:     c.Groups[i].Dtls,
 			L3:       c.Groups[i].L3,
 		}
 	}

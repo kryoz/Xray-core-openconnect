@@ -42,7 +42,7 @@ type ocRxPkt struct {
 	frame []byte     // full wire frame [acPKTData]+IP; payload = frame[1:]
 }
 
-// ocDevice is a gVisor link device that multiplexes every client's DTLS tunnel
+// ocDevice is a gVisor link device that multiplexes every client's CSTP tunnel
 // onto one stack: ReadPacket drains a shared RX queue (client→server), and
 // WritePacket routes an outgoing IP packet to the owning client by destination
 // virtual IP (server→client).
@@ -77,8 +77,8 @@ func newOCDevice(mtu uint32) *ocDevice {
 // ocWriter wraps one framed writer with an identity, so unregisterIf can tell
 // a stale session's writer from the live one occupying the same virtual IP.
 // batch, when non-nil, receives the frames of one gVisor flush as a single
-// call so the writer can pack several records into one datagram (DTLS) or one
-// TLS write (CSTP); f remains the single-frame path for relay/WritePacket.
+// call so the writer can pack several frames into one TLS write (CSTP);
+// f remains the single-frame path for relay/WritePacket.
 type ocWriter struct {
 	f     func([]byte) error
 	batch func([][]byte) error
@@ -325,10 +325,10 @@ func (e *ocLinkEndpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.E
 	var n int
 	var downlinkBytes int
 	// One gVisor flush can carry frames for several clients (they share the
-	// NIC), so group by tunnel writer: batch-capable writers (DTLS always;
-	// CSTP only when the client negotiated X-CSTP-Multi-Frame-Capability —
-	// stock clients require one STF frame per TLS record) get one batched
-	// write per flush, everyone else keeps the per-frame path.
+	// NIC), so group by tunnel writer: batch-capable writers (only when the
+	// client negotiated X-CSTP-Multi-Frame-Capability — stock clients
+	// require one STF frame per TLS record) get one batched write per flush,
+	// everyone else keeps the per-frame path.
 	batches := make(map[*ocWriter][][]byte)
 	for _, pb := range list.AsSlice() {
 		framed, dest := d.frame(pb)
@@ -640,10 +640,9 @@ func createOCStack(ep stack.LinkEndpoint) (*stack.Stack, error) {
 	// The fifo qdisc feeds WritePackets with whole gVisor flushes (up to 47
 	// packets) instead of one packet per call, which is what makes per-writer
 	// coalescing possible. Coalescing is per-writer and negotiated: batched
-	// writes — several CSTP frames per TLS record, several DTLS records per
-	// datagram — go only to sessions that sent X-CSTP-Multi-Frame-Capability
-	// in their CONNECT; stock openconnect needs one frame per record and one
-	// record per datagram.
+	// writes — several CSTP frames per TLS record — go only to sessions that
+	// sent X-CSTP-Multi-Frame-Capability in their CONNECT; stock openconnect
+	// needs one frame per record.
 	// ponytail: n=1 = one flush goroutine; a slow client's blocked write can
 	// head-of-line-block other clients on this NIC; raise n if multi-client
 	// throughput shows it.
