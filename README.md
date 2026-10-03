@@ -29,11 +29,12 @@ Also there's ready gVisor's features to filter traffic on the server.
 
 This fork adds an **OpenConnect / Cisco AnyConnect inbound** — a drop-in, ocserv-compatible VPN server, so standard OpenConnect clients (Linux, Android, iOS, macOS) connect to Xray natively:
 
-- **Control channel** — TLS 1.2 with ocserv-compatible HTTP auth forms (single-round username/password for mobile clients), cookie & resume
-- **Data channel** — DTLS 1.2 PSK over a gVisor userspace TCP/UDP/ICMP stack, with a pure-CSTP-over-TCP fallback for CGNAT / UDP-blocked networks
-- **ocserv parity** — camouflage (`camouflageSecret` / `camouflageRealm`, byte-compatible 401/404), DTLS cipher pinning, MTU 1500, per-user and per-group split routing (`X-CSTP-Split-Include` / `X-CSTP-Split-Exclude`)
-- **Per-group DTLS kill switch** (`dtls: false`) for carriers that throttle UDP
-- Virtual IP pool, DPD/keepalive, MTU discovery, per-user traffic stats, client-to-client L3 relay
+- **Control channel** — TLS 1.2/1.3 with ocserv-compatible HTTP auth forms (single-round username/password for mobile clients), cookie & resume
+- **Data channel** — CSTP over the control TLS connection, carrying a gVisor userspace TCP/UDP/ICMP stack. The DTLS channel was measured against the TCP path and removed: on the tested links CSTP was the cheaper one, and it needs no fallback negotiation on CGNAT or UDP-throttling carriers
+- **Multi-frame downlink coalescing** — several CSTP frames in one TLS write, negotiated by the `X-CSTP-Multi-Frame-Capability` header. This is a fork extension, not an ocserv option: only clients built against this fork send it, stock openconnect keeps one frame per TLS record
+- **ocserv parity** — camouflage (`camouflageSecret` / `camouflageRealm`, byte-compatible 401/404), MTU 1500, per-user and per-group split routing (`X-CSTP-Split-Include` / `X-CSTP-Split-Exclude`)
+- **Addressing is IPv4-only** — the virtual IP pool, `X-CSTP-Address` / `X-CSTP-Netmask` and the split routes are IPv4; the tunnel carries no IPv6
+- Virtual IP pool, DPD/keepalive, MTU discovery, per-user traffic stats, client-to-client L3 relay. `maxClients` bounds live tunnels, not session records: a client inside its resume window holds an address, not a slot
 
 Also in this fork:
 
@@ -41,6 +42,11 @@ Also in this fork:
 - **Strict egress socket options** — dialing fails (instead of silently leaking to the host's default route) when outbound socket options such as `interface` cannot be applied
 
 Full config [example](https://github.com/kryoz/Xray-core-openconnect/wiki/OpenConnect-example-config).
+
+Upgrading from a config that predates the DTLS removal: `dtls`, `dtlsPort`,
+`cipher` and the per-user / per-group `dtls` overrides no longer exist. Old
+configs still load — the JSON layer ignores unknown keys — but those fields do
+nothing now.
 
 User management:
 

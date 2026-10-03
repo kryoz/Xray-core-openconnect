@@ -644,11 +644,14 @@ func createOCStack(ep stack.LinkEndpoint) (*stack.Stack, error) {
 	// packets) instead of one packet per call, which is what makes per-writer
 	// coalescing possible. Coalescing is per-writer and negotiated: batched
 	// writes — several CSTP frames per TLS record — go only to sessions that
-	// sent X-CSTP-Multi-Frame-Capability in their CONNECT; stock openconnect
+	// sent X-CSTP-Multi-Frame-Capability in their CONNECT — a fork extension
+	// header, only clients built against this fork send it; stock openconnect
 	// needs one frame per record.
-	// ponytail: n=1 = one flush goroutine; a slow client's blocked write can
-	// head-of-line-block other clients on this NIC; raise n if multi-client
-	// throughput shows it.
+	// ponytail: n=1 = one flush goroutine, so a slow client's blocked write
+	// head-of-line-blocks every other client on this NIC; a mobile client on a
+	// lossy link is the expected trigger. Raising n is not the fix by itself:
+	// concurrent flushes may reorder packets for the same destination, so it
+	// needs per-destination ordering (or per-tunnel write queues) first.
 	if err := gStack.CreateNICWithOptions(ocNIC, ep, stack.NICOptions{QDisc: fifo.New(ep, 1, 1024)}); err != nil {
 		return nil, errors.New(err.String())
 	}

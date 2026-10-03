@@ -32,6 +32,10 @@ const (
 	// fragmentation, and the client-side MSS (X-CSTP-MTU - 40) lines up with
 	// the server-side one — sub-MSS incoming segments no longer split into
 	// two datagrams each (the ~1.4x pps anomaly of the 2026-09-27 report).
+	// The value is per-server, not per-session: the gVisor NIC MTU is one value
+	// for the whole shared stack, and X-CSTP-MTU has to match the server-side
+	// inner MSS. Adapting it to the negotiated TLS version would need a
+	// per-client NIC, which costs more than the 16 bytes it saves.
 	cstpOverhead = 78
 
 	// OpenConnect CSTP data-packet types (ocserv src/vpn.h).
