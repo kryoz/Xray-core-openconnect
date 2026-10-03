@@ -235,6 +235,70 @@ func TestDTLSMultiFrameWriterGating(t *testing.T) {
 	}
 }
 
+// TestDTLSMultiFrameBurst proves the negotiated DTLS path keeps the classic
+// one-byte Cisco framing per record: a burst of echo requests must produce
+// classic-framed replies ([acPKTData]+IP), never STF-framed bytes ("STF"
+// over DTLS is not a thing this server sends — stfBatch is CSTP/TCP-only),
+// regardless of how many records share a datagram (pion's Read returns one
+// record payload per call, so record-layer delimiting is exercised too).
+func TestDTLSMultiFrameBurst(t *testing.T) {
+	s := newTestServer(t)
+	c2, _, sess := ocConnectMF(t, s, true) // negotiated: batch writer active
+	defer func() { _ = c2.Close() }()
+
+	udpAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(s.conf.DtlsPort)}
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer func() { _ = pc.Close() }()
+
+	dc, err := dtls.ClientWithOptions(pc, udpAddr,
+		dtls.WithPSK(func(_ []byte) ([]byte, error) { return sess.getPSK(), nil }),
+		dtls.WithPSKIdentityHint([]byte("psk")),
+		dtls.WithCipherSuites(
+			dtls.TLS_PSK_WITH_AES_128_GCM_SHA256,
+			dtls.TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
+		),
+	)
+	if err != nil {
+		t.Fatalf("dtls client: %v", err)
+	}
+	defer func() { _ = dc.Close() }()
+	if err := dc.HandshakeContext(context.Background()); err != nil {
+		t.Fatalf("dtls handshake: %v", err)
+	}
+
+	const n = 3
+	for i := 0; i < n; i++ {
+		ip := buildICMPEchoRequest(sess.ip.AsSlice(), net.IPv4(1, 1, 1, 1), 0x123, uint16(i), []byte("burst"))
+		if _, err := dc.Write(append([]byte{acPKTData}, ip...)); err != nil {
+			t.Fatalf("dtls write %d: %v", i, err)
+		}
+	}
+
+	buf := make([]byte, 2048)
+	got := 0
+	_ = dc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for got < n {
+		rn, err := dc.Read(buf)
+		if err != nil {
+			t.Fatalf("dtls read %d: %v", got, err)
+		}
+		if rn < 1 || buf[0] != acPKTData {
+			t.Fatalf("reply %d starts with %#x, want classic acPKTData (0) — STF bytes must never appear over DTLS", got, buf[0])
+		}
+		reply := buf[1:rn]
+		if len(reply) < 28 || reply[9] != 1 || reply[20] != 0 {
+			t.Fatalf("reply %d is not an ICMP echo reply (%d bytes)", got, len(reply))
+		}
+		if seq := binary.BigEndian.Uint16(reply[26:28]); seq != uint16(got) {
+			t.Fatalf("reply %d seq = %d, want %d", got, seq, got)
+		}
+		got++
+	}
+}
+
 // fakeCounter is a minimal stats.Counter for test assertions.
 type fakeCounter struct {
 	n int64

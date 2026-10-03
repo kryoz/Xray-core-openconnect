@@ -224,9 +224,9 @@ func (s *Server) startDTLSSession(sess *ocSession, pipe *ocPipe, addr *net.UDPAd
 		}),
 		dtls.WithPSKIdentityHint([]byte(pskNegotiate)),
 		dtls.WithCipherSuites(suites...),
-		// OpenSSL-built openconnect clients send a DTLS 1.0 client_version
-		// (fake SSL_SESSION quirk); accept it and still negotiate 1.2.
-		dtls.WithLegacyClientHello(),
+		// The fork tolerates the DTLS 1.0 client_version OpenSSL-built
+		// openconnect clients send (unconditional since v3.1.9-xray2) while
+		// still negotiating 1.2.
 	)
 	if err != nil {
 		s.dropPipe(sess, pipe)
