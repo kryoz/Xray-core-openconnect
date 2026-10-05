@@ -6,6 +6,7 @@ import (
 	goerrors "errors"
 	"io"
 	"math/big"
+	"syscall"
 
 	"github.com/xtls/xray-core/common/dice"
 
@@ -174,6 +175,16 @@ func (h *Handler) Tag() string {
 	return h.tag
 }
 
+// peerReset reports whether the root cause is the peer aborting an already
+// established connection (RST). When the outbound's peer is the destination
+// host itself, that is how many connections simply end — as ordinary as the
+// io.EOF already filtered out below — so it must not print an Info line on a
+// busy server. The error is still submitted to the originator, so the access
+// log keeps the reason, and the message stays available at loglevel debug.
+func peerReset(cause error) bool {
+	return goerrors.Is(cause, syscall.ECONNRESET) || goerrors.Is(cause, syscall.ECONNABORTED)
+}
+
 // Dispatch implements proxy.Outbound.Dispatch.
 func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 	outbounds := session.OutboundsFromContext(ctx)
@@ -248,7 +259,11 @@ out:
 		// Ensure outbound ray is properly closed.
 		err := errors.New("failed to process outbound traffic").Base(err)
 		session.SubmitOutboundErrorToOriginator(ctx, err)
-		errors.LogInfo(ctx, err.Error())
+		if peerReset(errC) {
+			errors.LogDebug(ctx, err.Error())
+		} else {
+			errors.LogInfo(ctx, err.Error())
+		}
 		common.Interrupt(link.Writer)
 	} else {
 		if errC != nil && goerrors.Is(errC, io.ErrClosedPipe) {
