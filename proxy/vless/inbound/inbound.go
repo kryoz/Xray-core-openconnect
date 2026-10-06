@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -85,6 +86,8 @@ type Handler struct {
 	ctx                    context.Context
 	fallbacks              map[string]map[string]map[string]*Fallback // or nil
 	// regexps               map[string]*regexp.Regexp       // or nil
+	// sessions bounds max_sessions_per_user: live flows per account email.
+	sessions userSessionLimiter
 }
 
 // New creates a new VLess inbound handler.
@@ -100,6 +103,8 @@ func New(ctx context.Context, config *Config, dc dns.Client, validator vless.Val
 		defaultDispatcher:      v.GetFeature(routing.DispatcherType()).(routing.Dispatcher),
 		ctx:                    ctx,
 	}
+
+	handler.sessions = newUserSessionLimiter(int(config.MaxSessionsPerUser))
 
 	if config.Decryption != "" && config.Decryption != "none" {
 		s := strings.Split(config.Decryption, ".")
@@ -175,6 +180,53 @@ func New(ctx context.Context, config *Config, dc dns.Client, validator vless.Val
 	}
 
 	return handler, nil
+}
+
+// userSessionLimiter bounds the number of live VLESS flows per account email
+// (max_sessions_per_user, 0 = unlimited). A "session" is a live TCP or UDP
+// flow, so the limit is tuned in flows, not devices: a browser alone opens
+// several at once. Acquire/release happen in Handler.Process, where the real
+// connection enters the protocol: an XTLS/vision flow and a whole MUX bundle
+// each take one slot, while mux sub-connections in the dispatcher are not
+// counted separately.
+type userSessionLimiter struct {
+	max  int
+	mu   sync.Mutex
+	live map[string]int
+}
+
+func newUserSessionLimiter(max int) userSessionLimiter {
+	return userSessionLimiter{max: max, live: make(map[string]int)}
+}
+
+// tryAcquire reserves one flow slot for email and reports whether the limit
+// allows it. Called once per flow, after the request header is decoded.
+func (l *userSessionLimiter) tryAcquire(email string) bool {
+	if l.max <= 0 {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.live[email] >= l.max {
+		return false
+	}
+	l.live[email]++
+	return true
+}
+
+// release frees one flow slot of email. It is called once per acquired flow,
+// deferred in Handler.Process so it runs exactly when the flow ends.
+func (l *userSessionLimiter) release(email string) {
+	if l.max <= 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if n := l.live[email]; n > 1 {
+		l.live[email] = n - 1
+	} else {
+		delete(l.live, email)
+	}
 }
 
 func isMuxAndNotXUDP(request *protocol.RequestHeader, first *buf.Buffer) bool {
@@ -523,6 +575,25 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 		}
 		return err
 	}
+
+	// max_sessions_per_user bounds this account's live flows. The user is
+	// known only after the header decodes, so the slot is acquired here and
+	// released when this flow ends: Process blocks for the whole lifetime of
+	// the TCP/UDP flow, so the deferred release is the flow's end. A rejected
+	// flow gets a closed connection — the only refusal a VLESS client can see;
+	// live flows are never cut.
+	if !h.sessions.tryAcquire(request.User.Email) {
+		err := errors.New("max sessions per user reached for ", request.User.Email)
+		errors.LogWarning(ctx, "vless: max sessions per user reached, rejecting flow from ", connection.RemoteAddr(), " for ", request.User.Email)
+		log.Record(&log.AccessMessage{
+			From:   connection.RemoteAddr(),
+			To:     "",
+			Status: log.AccessRejected,
+			Reason: err,
+		})
+		return err
+	}
+	defer h.sessions.release(request.User.Email)
 
 	if err := connection.SetReadDeadline(time.Time{}); err != nil {
 		errors.LogWarningInner(ctx, err, "unable to set back read deadline")

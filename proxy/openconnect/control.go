@@ -238,6 +238,8 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, pending *
 	}
 	s.limiter.reset(peerIP)
 
+	u := s.users.userByName(user)
+
 	// max_clients bounds live tunnels, not session records: a session inside its
 	// resume window without a tunnel holds an IP lease, not a client slot.
 	// Checked before the stale-session sweep below: a rejected client must not
@@ -248,6 +250,18 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, pending *
 		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: max clients reached, rejecting %s", peerIP))
 		_ = writeHTTP(tc, 503, "text/plain", nil, "too many clients")
 		return
+
+	}
+
+	// max_sessions_per_user bounds one account's live tunnels with the same
+	// live-tunnels-not-records accounting as max_clients: a disconnected
+	// session inside its resume window is swept below, not counted. A cookie
+	// holder skipping auth is re-checked in handleConnect. The bound resolves
+	// user override → group override → inbound default.
+	if lim := s.conf.maxSessionsPerUserFor(u); lim > 0 && s.registry.connectedCount(user, nil) >= int(lim) {
+		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: max sessions per user reached, rejecting %s for %s", peerIP, user))
+		_ = writeHTTP(tc, 503, "text/plain", nil, "too many clients (account)")
+		return
 	}
 
 	// A cookie-less re-auth (app restart, VPN toggle, lost cookie, changed
@@ -257,7 +271,6 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, pending *
 	// client changes it on every attempt.
 	s.registry.supersedeStale(s.ctx, user)
 
-	u := s.users.userByName(user)
 	sess, err := s.registry.create(peerIP, u, s.conf.l3For(u))
 	if err != nil {
 		// Pool exhaustion or a bad static IP: without this line the client
@@ -288,6 +301,16 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq) {
 	if sess.expired(time.Now(), time.Duration(s.cookieTimeoutSecs())*time.Second) {
 		s.registry.remove(s.ctx, sess, "cookie/resume window expired")
 		_ = writeHTTP(tc, 401, "text/plain", nil, "unauthorized")
+		return
+
+	}
+
+	// The per-account limit re-checked here: a resume skips the auth forms
+	// entirely. sess.sid is excepted because a re-CONNECT replaces this
+	// session's own tunnel, which must not block it (connectedCount).
+	if lim := s.conf.maxSessionsPerUserFor(sess.user); lim > 0 && s.registry.connectedCount(sess.userName(), &sess.sid) >= int(lim) {
+		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: max sessions per user reached, rejecting CONNECT from %s for %s", sess.clientIP, sess.userName()))
+		_ = writeHTTP(tc, 503, "text/plain", nil, "too many clients (account)")
 		return
 	}
 	// One tunnel per session: a new CONNECT replaces the previous one, as

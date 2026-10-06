@@ -40,9 +40,12 @@ type User struct {
 	// Per-user override: unset falls back to the group's l3 flag (opt-in,
 	// default off), true forces relay on, false forces it off. Pairs without
 	// l3 on both sides keep the regular behavior.
-	L3            *bool `protobuf:"varint,6,opt,name=l3,proto3,oneof" json:"l3,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	L3 *bool `protobuf:"varint,6,opt,name=l3,proto3,oneof" json:"l3,omitempty"`
+	// Live-tunnel bound for this account (0 = unlimited). Overrides the
+	// group's max_sessions_per_user, which overrides the inbound-level one.
+	MaxSessionsPerUser *uint32 `protobuf:"varint,8,opt,name=max_sessions_per_user,json=maxSessionsPerUser,proto3,oneof" json:"max_sessions_per_user,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *User) Reset() {
@@ -117,6 +120,13 @@ func (x *User) GetL3() bool {
 	return false
 }
 
+func (x *User) GetMaxSessionsPerUser() uint32 {
+	if x != nil && x.MaxSessionsPerUser != nil {
+		return *x.MaxSessionsPerUser
+	}
+	return 0
+}
+
 // Group is a named set of split-routing networks shared by users.
 type Group struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -130,9 +140,13 @@ type Group struct {
 	NoRoutes []string `protobuf:"bytes,4,rep,name=no_routes,json=noRoutes,proto3" json:"no_routes,omitempty"`
 	// L3 client-to-client reachability for this group's users. Unset = false
 	// (opt-in). A user's own l3 flag overrides the group.
-	L3            *bool `protobuf:"varint,5,opt,name=l3,proto3,oneof" json:"l3,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	L3 *bool `protobuf:"varint,5,opt,name=l3,proto3,oneof" json:"l3,omitempty"`
+	// Live-tunnel bound shared by this group's users (0 = unlimited).
+	// Overrides the inbound-level max_sessions_per_user; a user's own flag
+	// overrides the group.
+	MaxSessionsPerUser *uint32 `protobuf:"varint,6,opt,name=max_sessions_per_user,json=maxSessionsPerUser,proto3,oneof" json:"max_sessions_per_user,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *Group) Reset() {
@@ -193,6 +207,13 @@ func (x *Group) GetL3() bool {
 	return false
 }
 
+func (x *Group) GetMaxSessionsPerUser() uint32 {
+	if x != nil && x.MaxSessionsPerUser != nil {
+		return *x.MaxSessionsPerUser
+	}
+	return 0
+}
+
 type OpenConnectInboundConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Users []*User                `protobuf:"bytes,1,rep,name=users,proto3" json:"users,omitempty"`
@@ -222,9 +243,16 @@ type OpenConnectInboundConfig struct {
 	// Realm advertised in the 401 WWW-Authenticate header. Empty = plain 404.
 	CamouflageRealm string `protobuf:"bytes,13,opt,name=camouflage_realm,json=camouflageRealm,proto3" json:"camouflage_realm,omitempty"`
 	// Named route groups referenced by User.group.
-	Groups        []*Group `protobuf:"bytes,14,rep,name=groups,proto3" json:"groups,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Groups []*Group `protobuf:"bytes,14,rep,name=groups,proto3" json:"groups,omitempty"`
+	// Default live-tunnel bound for one account (0 = unlimited); a user's own
+	// max_sessions_per_user, then its group's, override it. Same
+	// live-tunnels-not-session-records accounting as max_clients: a disconnected
+	// session inside its resume window holds an IP lease, not a slot. Enforced
+	// at authentication AND at CONNECT: a cookie holder resumes without
+	// re-authenticating, so the auth-time check alone would let it through.
+	MaxSessionsPerUser uint32 `protobuf:"varint,16,opt,name=max_sessions_per_user,json=maxSessionsPerUser,proto3" json:"max_sessions_per_user,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *OpenConnectInboundConfig) Reset() {
@@ -348,25 +376,36 @@ func (x *OpenConnectInboundConfig) GetGroups() []*Group {
 	return nil
 }
 
+func (x *OpenConnectInboundConfig) GetMaxSessionsPerUser() uint32 {
+	if x != nil {
+		return x.MaxSessionsPerUser
+	}
+	return 0
+}
+
 var File_proxy_openconnect_config_proto protoreflect.FileDescriptor
 
 const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\n" +
-	"\x1eproxy/openconnect/config.proto\x12\x16xray.proxy.openconnect\"\x96\x01\n" +
+	"\x1eproxy/openconnect/config.proto\x12\x16xray.proxy.openconnect\"\xe8\x01\n" +
 	"\x04User\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12\x0e\n" +
 	"\x02ip\x18\x03 \x01(\tR\x02ip\x12\x16\n" +
 	"\x06routes\x18\x04 \x03(\tR\x06routes\x12\x14\n" +
 	"\x05group\x18\x05 \x01(\tR\x05group\x12\x13\n" +
-	"\x02l3\x18\x06 \x01(\bH\x00R\x02l3\x88\x01\x01B\x05\n" +
-	"\x03_l3J\x04\b\a\x10\b\"r\n" +
+	"\x02l3\x18\x06 \x01(\bH\x00R\x02l3\x88\x01\x01\x126\n" +
+	"\x15max_sessions_per_user\x18\b \x01(\rH\x01R\x12maxSessionsPerUser\x88\x01\x01B\x05\n" +
+	"\x03_l3B\x18\n" +
+	"\x16_max_sessions_per_userJ\x04\b\a\x10\b\"\xc4\x01\n" +
 	"\x05Group\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06routes\x18\x02 \x03(\tR\x06routes\x12\x1b\n" +
 	"\tno_routes\x18\x04 \x03(\tR\bnoRoutes\x12\x13\n" +
-	"\x02l3\x18\x05 \x01(\bH\x00R\x02l3\x88\x01\x01B\x05\n" +
-	"\x03_l3J\x04\b\x03\x10\x04\"\xcf\x03\n" +
+	"\x02l3\x18\x05 \x01(\bH\x00R\x02l3\x88\x01\x01\x126\n" +
+	"\x15max_sessions_per_user\x18\x06 \x01(\rH\x01R\x12maxSessionsPerUser\x88\x01\x01B\x05\n" +
+	"\x03_l3B\x18\n" +
+	"\x16_max_sessions_per_userJ\x04\b\x03\x10\x04\"\x82\x04\n" +
 	"\x18OpenConnectInboundConfig\x122\n" +
 	"\x05users\x18\x01 \x03(\v2\x1c.xray.proxy.openconnect.UserR\x05users\x12\x16\n" +
 	"\x06subnet\x18\x02 \x01(\tR\x06subnet\x12\x10\n" +
@@ -381,7 +420,8 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\x06routes\x18\v \x03(\tR\x06routes\x12+\n" +
 	"\x11camouflage_secret\x18\f \x01(\tR\x10camouflageSecret\x12)\n" +
 	"\x10camouflage_realm\x18\r \x01(\tR\x0fcamouflageRealm\x125\n" +
-	"\x06groups\x18\x0e \x03(\v2\x1d.xray.proxy.openconnect.GroupR\x06groupsJ\x04\b\n" +
+	"\x06groups\x18\x0e \x03(\v2\x1d.xray.proxy.openconnect.GroupR\x06groups\x121\n" +
+	"\x15max_sessions_per_user\x18\x10 \x01(\rR\x12maxSessionsPerUserJ\x04\b\n" +
 	"\x10\vJ\x04\b\x0f\x10\x10Bd\n" +
 	"\x1acom.xray.proxy.openconnectP\x01Z+github.com/xtls/xray-core/proxy/openconnect\xaa\x02\x16Xray.Proxy.OpenConnectb\x06proto3"
 

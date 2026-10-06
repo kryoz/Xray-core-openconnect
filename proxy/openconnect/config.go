@@ -233,6 +233,26 @@ func (c *OpenConnectInboundConfig) l3For(u *User) bool {
 	return false
 }
 
+// maxSessionsPerUserFor returns the live-tunnel bound that applies to u's
+// account: the user's own max_sessions_per_user when set, otherwise the
+// group's, otherwise the inbound-level one. 0 = unlimited.
+func (c *OpenConnectInboundConfig) maxSessionsPerUserFor(u *User) uint32 {
+	if u != nil && u.MaxSessionsPerUser != nil {
+		return *u.MaxSessionsPerUser
+	}
+	if u != nil && u.Group != "" {
+		for _, g := range c.Groups {
+			if g.Name == u.Group {
+				if g.MaxSessionsPerUser != nil {
+					return *g.MaxSessionsPerUser
+				}
+				break
+			}
+		}
+	}
+	return c.MaxSessionsPerUser
+}
+
 // validateRoute checks one split-routing network: IPv4 CIDR.
 func validateRoute(r string) error {
 	p, err := netip.ParsePrefix(r)

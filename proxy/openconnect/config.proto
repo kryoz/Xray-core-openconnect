@@ -29,6 +29,9 @@ message User {
   // channel. Reserved so a future field cannot take the number and silently
   // mis-decode an old config.
   reserved 7;
+  // Live-tunnel bound for this account (0 = unlimited). Overrides the
+  // group's max_sessions_per_user, which overrides the inbound-level one.
+  optional uint32 max_sessions_per_user = 8;
 }
 // Group is a named set of split-routing networks shared by users.
 message Group {
@@ -45,6 +48,10 @@ message Group {
   optional bool l3 = 5;
   // dtls (3) was the group DTLS offer, removed with the DTLS data channel.
   reserved 3;
+  // Live-tunnel bound shared by this group's users (0 = unlimited).
+  // Overrides the inbound-level max_sessions_per_user; a user's own flag
+  // overrides the group.
+  optional uint32 max_sessions_per_user = 6;
 }
 
 message OpenConnectInboundConfig {
@@ -78,4 +85,11 @@ message OpenConnectInboundConfig {
   string camouflage_realm = 13;
   // Named route groups referenced by User.group.
   repeated Group groups = 14;
+  // Default live-tunnel bound for one account (0 = unlimited); a user's own
+  // max_sessions_per_user, then its group's, override it. Same
+  // live-tunnels-not-session-records accounting as max_clients: a disconnected
+  // session inside its resume window holds an IP lease, not a slot. Enforced
+  // at authentication AND at CONNECT: a cookie holder resumes without
+  // re-authenticating, so the auth-time check alone would let it through.
+  uint32 max_sessions_per_user = 16;
 }

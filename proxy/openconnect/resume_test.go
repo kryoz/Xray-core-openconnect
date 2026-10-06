@@ -60,6 +60,9 @@ func testPW(password string) string {
 // boolP returns a pointer to a bool, for building optional proto fields in tests.
 func boolP(v bool) *bool { return &v }
 
+// u32P returns a pointer to a uint32, for building optional proto fields in tests.
+func u32P(v uint32) *uint32 { return &v }
+
 // newTestServer builds a Server with the default single test user.
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
@@ -681,5 +684,137 @@ func TestMaxClientsCountsLiveTunnels(t *testing.T) {
 	stA2, _ := ocAuth(t, s, "alice", "pw-a")
 	if stA2 != 503 {
 		t.Fatalf("alice re-auth with one live tunnel: status %d, want 503", stA2)
+	}
+}
+
+// TestMaxSessionsPerUserLimits: max_sessions_per_user bounds live tunnels of
+// one account. A third device is rejected at auth (503) and, when it already
+// holds a cookie, at CONNECT — where the auth check cannot see it. Other
+// accounts keep getting in, a session re-CONNECTing must not be blocked by
+// its own tunnel, and a freed slot admits the same account again.
+func TestMaxSessionsPerUserLimits(t *testing.T) {
+	s := newTestServerUsers(t, []*User{
+		{Name: "alice", Password: testPW("pw-a")},
+		{Name: "bob", Password: testPW("pw-b")},
+	})
+	s.conf.MaxSessionsPerUser = 1
+
+	stA, cookieA := ocAuth(t, s, "alice", "pw-a")
+	if stA != 200 {
+		t.Fatalf("alice auth: status %d, want 200", stA)
+	}
+	tunA, _ := mustTunnel(t, s, cookieA)
+	sessA := s.registry.getBySID(sidFromCookie(t, s, cookieA))
+	if sessA == nil {
+		t.Fatal("no session for alice")
+	}
+
+	// Second device of the same account: rejected at auth while one tunnel is
+	// live. Other accounts are unaffected by someone else's limit.
+	if st, _ := ocAuth(t, s, "alice", "pw-a"); st != 503 {
+		t.Fatalf("second alice auth with a live tunnel: status %d, want 503", st)
+	}
+	stB, cookieB := ocAuth(t, s, "bob", "pw-b")
+	if stB != 200 {
+		t.Fatalf("bob auth while alice is at the limit: status %d, want 200", stB)
+	}
+	tunB, _ := mustTunnel(t, s, cookieB)
+	defer func() { _ = tunB.Close() }()
+
+	// A session re-CONNECTing must not be blocked by its own live tunnel.
+	if st, _, _ := ocTunnel(t, s, cookieB); st != 200 {
+		t.Fatalf("bob re-CONNECT: status %d, want 200", st)
+	}
+
+	// A cookie holder skipping the auth forms is still held to the limit at
+	// CONNECT: a second, never-connected session of alice must not open a
+	// tunnel while her first one is live.
+	ghost, err := s.registry.create("127.0.0.1", s.users.userByName("alice"), false)
+	if err != nil {
+		t.Fatalf("create ghost session: %v", err)
+	}
+	cookieGhost := base64.StdEncoding.EncodeToString(ghost.sid[:])
+	if st, _, _ := ocTunnel(t, s, cookieGhost); st != 503 {
+		t.Fatalf("ghost alice resume with a live tunnel: status %d, want 503", st)
+	}
+
+	// A freed slot admits the same account again.
+	_ = tunA.Close()
+	waitDisconnected(t, sessA)
+	if st, _ := ocAuth(t, s, "alice", "pw-a"); st != 200 {
+		t.Fatalf("alice auth after her tunnel closed: status %d, want 200", st)
+	}
+}
+
+// TestMaxSessionsPerUserScopedLimits: maxSessionsPerUser resolves as
+// user override → group override → inbound default. The group bound is
+// stricter than the inbound default, a user's 0 (unlimited) beats the group,
+// and the resolved bound is re-applied at CONNECT for cookie holders.
+func TestMaxSessionsPerUserScopedLimits(t *testing.T) {
+	s := newTestServerUsers(t, []*User{
+		{Name: "alice", Password: testPW("pw-a"), Group: "team"},
+		{Name: "bob", Password: testPW("pw-b")},
+		{Name: "dave", Password: testPW("pw-d"), Group: "team", MaxSessionsPerUser: u32P(0)},
+	})
+	s.conf.MaxSessionsPerUser = 2
+	s.conf.Groups = []*Group{{Name: "team", MaxSessionsPerUser: u32P(1)}}
+
+	// Group override: alice is limited to one tunnel, not the inbound's two.
+	stA, cookieA := ocAuth(t, s, "alice", "pw-a")
+	if stA != 200 {
+		t.Fatalf("alice auth: status %d, want 200", stA)
+	}
+	tunA, _ := mustTunnel(t, s, cookieA)
+	defer func() { _ = tunA.Close() }()
+	if st, _ := ocAuth(t, s, "alice", "pw-a"); st != 503 {
+		t.Fatalf("second alice auth under the group limit: status %d, want 503", st)
+	}
+
+	// No group: bob is held to the inbound default of two.
+	stB1, cookieB1 := ocAuth(t, s, "bob", "pw-b")
+	if stB1 != 200 {
+		t.Fatalf("bob auth 1: status %d, want 200", stB1)
+	}
+	tunB1, _ := mustTunnel(t, s, cookieB1)
+	defer func() { _ = tunB1.Close() }()
+	stB2, cookieB2 := ocAuth(t, s, "bob", "pw-b")
+	if stB2 != 200 {
+		t.Fatalf("bob auth 2: status %d, want 200", stB2)
+	}
+	tunB2, _ := mustTunnel(t, s, cookieB2)
+	defer func() { _ = tunB2.Close() }()
+	if st, _ := ocAuth(t, s, "bob", "pw-b"); st != 503 {
+		t.Fatalf("third bob auth at the inbound default: status %d, want 503", st)
+	}
+
+	// User override: dave's 0 (unlimited) beats his group's one.
+	stD1, cookieD1 := ocAuth(t, s, "dave", "pw-d")
+	if stD1 != 200 {
+		t.Fatalf("dave auth 1: status %d, want 200", stD1)
+	}
+	tunD1, _ := mustTunnel(t, s, cookieD1)
+	defer func() { _ = tunD1.Close() }()
+	stD2, cookieD2 := ocAuth(t, s, "dave", "pw-d")
+	if stD2 != 200 {
+		t.Fatalf("dave auth 2, user override is unlimited: status %d, want 200", stD2)
+	}
+	tunD2, _ := mustTunnel(t, s, cookieD2)
+	defer func() { _ = tunD2.Close() }()
+
+	// The CONNECT re-check uses the RESOLVED bound: alice's group limit
+	// rejects a ghost resume, dave's unlimited override admits one.
+	ghostA, err := s.registry.create("127.0.0.1", s.users.userByName("alice"), false)
+	if err != nil {
+		t.Fatalf("create ghost session: %v", err)
+	}
+	if st, _, _ := ocTunnel(t, s, base64.StdEncoding.EncodeToString(ghostA.sid[:])); st != 503 {
+		t.Fatalf("ghost alice resume under the group limit: status %d, want 503", st)
+	}
+	ghostD, err := s.registry.create("127.0.0.1", s.users.userByName("dave"), false)
+	if err != nil {
+		t.Fatalf("create ghost session: %v", err)
+	}
+	if st, _, _ := ocTunnel(t, s, base64.StdEncoding.EncodeToString(ghostD.sid[:])); st != 200 {
+		t.Fatalf("ghost dave resume under the unlimited user override: status %d, want 200", st)
 	}
 }

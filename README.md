@@ -34,12 +34,13 @@ This fork adds an **OpenConnect / Cisco AnyConnect inbound** — a drop-in, ocse
 - **Multi-frame downlink coalescing** — several CSTP frames in one TLS write, negotiated by the `X-CSTP-Multi-Frame-Capability` header. This is a fork extension, not an ocserv option: only clients built against this fork send it, stock openconnect keeps one frame per TLS record
 - **ocserv parity** — camouflage (`camouflageSecret` / `camouflageRealm`, byte-compatible 401/404), MTU 1500, per-user and per-group split routing (`X-CSTP-Split-Include` / `X-CSTP-Split-Exclude`)
 - **Addressing is IPv4-only** — the virtual IP pool, `X-CSTP-Address` / `X-CSTP-Netmask` and the split routes are IPv4; the tunnel carries no IPv6
-- Virtual IP pool, DPD/keepalive, MTU discovery, per-user traffic stats, client-to-client L3 relay. `maxClients` bounds live tunnels, not session records: a client inside its resume window holds an address, not a slot. It is enforced at authentication: a client that still holds a valid cookie resumes without re-checking it
+- Virtual IP pool, DPD/keepalive, MTU discovery, per-user traffic stats, client-to-client L3 relay. `maxClients` bounds live tunnels, not session records: a client inside its resume window holds an address, not a slot. It is enforced at authentication: a client that still holds a valid cookie resumes without re-checking it. `maxSessionsPerUser` (0 = unlimited) does the same accounting per account and also re-checks at CONNECT, where cookie holders skip auth; settable on the inbound (default), a group, and a user — the most specific set value wins
 
 Also in this fork:
 
 - **Router: `failover` balancing strategy** — traffic sticks to the highest-priority outbound and fails over only after N consecutive failed observatory probes, with automatic failback (set `fallbackTag` on the balancing rule for the all-down case)
 - **Strict egress socket options** — dialing fails (instead of silently leaking to the host's default route) when outbound socket options such as `interface` cannot be applied
+- **VLESS inbound: `maxSessionsPerUser`** — bounds live flows of one account per inbound (0 = unlimited). A session is a live TCP/UDP flow, so tune it in flows, not devices: a browser alone opens several at once. An XTLS/vision flow and a whole MUX bundle each take one slot; excess flows get a closed connection, live flows are never cut
 
 Full config [example](https://github.com/kryoz/Xray-core-openconnect/wiki/OpenConnect-example-config).
 

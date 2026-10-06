@@ -26,4 +26,12 @@ message Config {
   int64 seconds_from = 5;
   int64 seconds_to = 6;
   string padding = 7;
+  // Bounds live flows of one account per inbound tag, per email (0 =
+// unlimited). A "session"
+  // here is a live TCP or UDP flow, so tune it in flows, not devices: a
+  // browser alone opens several at once. Counted where the real connection
+  // enters Process — an XTLS/vision flow and a whole MUX bundle each take one
+  // slot. Excess flows get a closed connection, the only refusal a VLESS
+  // client can see; live flows are never cut.
+  uint32 max_sessions_per_user = 8;
 }

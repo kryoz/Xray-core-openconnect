@@ -276,6 +276,25 @@ func (r *sessionRegistry) countConnected() int {
 	return n
 }
 
+// connectedCount returns how many sessions of user have a live tunnel — what
+// max_sessions_per_user bounds (same live-tunnels-not-records accounting as
+// countConnected/max_clients). except, when non-nil, is left out of the
+// count: a session re-CONNECTing after a dropped path replaces its own
+// tunnel, and must not be blocked by the very tunnel it replaces.
+// Best-effort snapshot: two CONNECTs of one user racing can both see the
+// limit not yet reached and overshoot by one until a tunnel closes.
+func (r *sessionRegistry) connectedCount(user string, except *[32]byte) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, sess := range r.bySID {
+		if sess.userName() == user && (except == nil || sess.sid != *except) && sess.isConnected() {
+			n++
+		}
+	}
+	return n
+}
+
 // supersedeStale drops every session of user that has no live tunnel and
 // returns how many. A cookie-less reconnect loop (app restart, VPN toggle, lost
 // cookie, changed source address) otherwise leaves one zombie per attempt, each

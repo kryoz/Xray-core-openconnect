@@ -31,12 +31,13 @@ type VLessInboundFallback struct {
 }
 
 type VLessInboundConfig struct {
-	Users      []json.RawMessage       `json:"users"`
-	Clients    []json.RawMessage       `json:"clients"`
-	Decryption string                  `json:"decryption"`
-	Fallbacks  []*VLessInboundFallback `json:"fallbacks"`
-	Flow       string                  `json:"flow"`
-	Testseed   []uint32                `json:"testseed"`
+	Users              []json.RawMessage       `json:"users"`
+	Clients            []json.RawMessage       `json:"clients"`
+	Decryption         string                  `json:"decryption"`
+	Fallbacks          []*VLessInboundFallback `json:"fallbacks"`
+	Flow               string                  `json:"flow"`
+	Testseed           []uint32                `json:"testseed"`
+	MaxSessionsPerUser uint32                  `json:"maxSessionsPerUser"`
 }
 
 // Build implements Buildable
@@ -103,6 +104,7 @@ func (c *VLessInboundConfig) Build() (proto.Message, error) {
 		return nil, err
 	}
 
+	config.MaxSessionsPerUser = c.MaxSessionsPerUser
 	config.Decryption = c.Decryption
 	if !func() bool {
 		s := strings.Split(config.Decryption, ".")
