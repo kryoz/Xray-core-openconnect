@@ -11,7 +11,7 @@ There are two different stories/baselines:
 `OpenConnect` was focused on implementing Cisco Anyconnect compatible enterprise-level protocol. It has important differencies from VLESS: 
 - Client-side split-routing where routes are provided from server;
 - L3 level communication between clients;
-- UDP/TCP communication with fallback to TCP (DTLS).
+- Broad support in various devices.
 
 The primary usecase for OpenConnect is home routers many of which has OC-client in the stock bundle and "additive routing policy". Instead of routing ALL traffic into VPN the server (where it's filtered by gVisor) the router sends only packets to VPN by server's ip routing list (client side split routing).
 
