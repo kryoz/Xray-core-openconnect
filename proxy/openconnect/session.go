@@ -39,6 +39,7 @@ type ocSession struct {
 	tunnelGen uint64
 	kick      func()
 	lastDisc  time.Time // last tunnel disconnect; drives cookie/resume TTL
+	kicked    bool      // tunnel closed by the server (block/remove), not by the client
 	// writer is the device writer token this session's live tunnel registered;
 	// teardown unregisters it only while it still owns the slot (two sessions
 	// of one user may share a static virtual IP). Guarded by mu.
@@ -125,6 +126,7 @@ func (s *ocSession) openTunnel(tc io.Closer) uint64 {
 	gen := s.tunnelGen
 	prev := s.kick
 	s.kick = func() { _ = tc.Close() }
+	s.kicked = false
 	s.mu.Unlock()
 	if prev != nil {
 		prev()
@@ -147,6 +149,28 @@ func (s *ocSession) closeTunnel(gen uint64) {
 		s.lastDisc = time.Now()
 	}
 	s.mu.Unlock()
+}
+
+// takeKick returns the closer of the live tunnel, if any, and clears it, so a
+// disconnect caused by the operator closes exactly the tunnel that is up now
+// and can never reach a successor's connection.
+func (s *ocSession) takeKick() func() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := s.kick
+	s.kick = nil
+	if k != nil {
+		s.kicked = true
+	}
+	return k
+}
+
+// kickedByServer reports whether the tunnel was closed by the server (a block
+// or a removal) rather than by the client or the network.
+func (s *ocSession) kickedByServer() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.kicked
 }
 
 // isSuperseded reports whether a newer CONNECT replaced this pump; the read
@@ -345,6 +369,34 @@ func (r *sessionRegistry) releaseLease(sess *ocSession) {
 	}
 }
 
+// disconnectUser drops every session of a user: out of both indexes, off the
+// air, and back with its IP. It is what makes a block or a removal take effect
+// on a tunnel that is up right now, instead of on the client's next reconnect.
+//
+// Retiring under the write lock means only this call ever releases a given
+// session's lease. The session lock is taken after r.mu is released, keeping
+// the documented registry-before-session order.
+func (r *sessionRegistry) disconnectUser(ctx context.Context, user, reason string) int {
+	r.mu.Lock()
+	var victims []*ocSession
+	for _, sess := range r.bySID {
+		if sess.userName() != user {
+			continue
+		}
+		r.retireLocked(sess)
+		victims = append(victims, sess)
+	}
+	r.mu.Unlock()
+	for _, sess := range victims {
+		if kick := sess.takeKick(); kick != nil {
+			kick()
+		}
+		r.releaseLease(sess)
+		sess.logSessionEnd(ctx, reason)
+	}
+	return len(victims)
+}
+
 // remove drops a session and releases its dynamic IP. A session already reaped
 // by the sweep or by a supersede is not released a second time.
 func (r *sessionRegistry) remove(ctx context.Context, sess *ocSession, reason string) {
@@ -430,6 +482,21 @@ func (p *ipPool) reserve(ip netip.Addr) {
 	p.mu.Lock()
 	p.allocated[ip] = struct{}{}
 	p.mu.Unlock()
+}
+
+// tryReserve claims one specific address and reports whether it was free. A
+// runtime static-IP add needs it: at start the whole config is known before the
+// first session exists, but an account added later can name an address a live
+// session already holds, and two sessions on one virtual address would clobber
+// the byVirtIP index the L3 relay and the per-user stats are keyed by.
+func (p *ipPool) tryReserve(ip netip.Addr) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, taken := p.allocated[ip]; taken {
+		return false
+	}
+	p.allocated[ip] = struct{}{}
+	return true
 }
 
 func (p *ipPool) alloc() (netip.Addr, error) {

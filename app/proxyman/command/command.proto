@@ -18,6 +18,12 @@ message RemoveUserOperation {
   string email = 1;
 }
 
+message BlockUserOperation {
+  string email = 1;
+  // false unblocks the user.
+  bool blocked = 2;
+}
+
 message AddInboundRequest {
   core.InboundHandlerConfig inbound = 1;
 }

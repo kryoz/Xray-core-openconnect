@@ -49,7 +49,9 @@ Upgrading from a config that predates the DTLS removal: `dtls`, `dtlsPort`,
 configs still load — the JSON layer ignores unknown keys — but those fields do
 nothing now.
 
-User management:
+### User management
+
+Offline — edit a config file, applied on the next start:
 
 ```bash
 xray openconnect hash [<password>]
@@ -57,7 +59,49 @@ xray openconnect add    -c cfg.json [-in tag] [-ip 10.66.0.5] <name> <password>
 xray openconnect list   -c cfg.json [-in tag]
 xray openconnect passwd -c cfg.json <name> <password>
 xray openconnect rm     -c cfg.json <name>
+xray openconnect block  -c cfg.json [-in tag] <name>
+xray openconnect unblock -c cfg.json [-in tag] <name>
 ```
+
+Online — applied to the running process, no restart:
+
+```bash
+xray openconnect add   -s 127.0.0.1:8080 -in oc <name> <password>
+xray openconnect list  -s 127.0.0.1:8080 -in oc
+xray openconnect rm    -s 127.0.0.1:8080 -in oc <name>
+xray openconnect block -s 127.0.0.1:8080 -in oc <name>   # or unblock
+xray api adu -tag=oc users.json      # add users of any supported inbound
+xray api bu  -tag=oc <email>         # block; -unblock restores
+xray api rmu -tag=oc <email>         # remove
+```
+
+Blocking keeps the account — its credential, static address and stats key — and
+takes away its access: a blocked user cannot authenticate, cannot resume on a
+session cookie it still holds, and loses the tunnels it has up within a second.
+VLESS behaves the same way: a blocked account is refused exactly like an unknown
+UUID, and its live flows are closed. `xray openconnect passwd` is offline-only —
+rotating a password online would mean deleting and re-adding the account, which
+cannot be rolled back half-way.
+
+To make runtime changes survive a restart, give the inbound a `usersFile`:
+
+```json
+{ "tag": "oc", "protocol": "openconnect", "settings": { "usersFile": "/etc/xray/oc-users.json", "users": [ … ] } }
+```
+
+The file is seeded from `users` on the first start and is the source of accounts
+from then on: every add, block and remove is written to it atomically (0600,
+temp + rename), while the config file itself is never rewritten. Without
+`usersFile` the behavior is unchanged — runtime changes last until the next
+restart. VLESS inbounds take the same `settings.usersFile`.
+
+> **The management API is not authenticated.** Whoever can reach the commander
+> address (`-s`, the `commander`/stats inbound, default `127.0.0.1:8080`) can
+> create, block and delete users of every inbound and read their accounts —
+> root-equivalent on a proxy that routes your traffic. Bind it to loopback or a
+> unix socket (`@xray-api`) only. `xray api lu`/`ListInbounds` still returns
+> inbound settings verbatim, credentials included; `api ru`/`GetInboundUsers`
+> masks the `password` of every account it lists.
 
 # Disclaimer
 

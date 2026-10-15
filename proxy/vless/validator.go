@@ -13,6 +13,7 @@ type Validator interface {
 	Get(id uuid.UUID) *protocol.MemoryUser
 	Add(u *protocol.MemoryUser) error
 	Del(email string) error
+	SetBlocked(email string, blocked bool) error
 	GetByEmail(email string) *protocol.MemoryUser
 	GetAll() []*protocol.MemoryUser
 	GetCount() int64
@@ -58,16 +59,53 @@ func (v *MemoryValidator) Del(e string) error {
 	return nil
 }
 
-// Get a VLESS user with UUID, nil if user doesn't exist.
-func (v *MemoryValidator) Get(id uuid.UUID) *protocol.MemoryUser {
-	u, _ := v.users.Load(ProcessUUID(id))
-	if u != nil {
-		return u.(*protocol.MemoryUser)
+// SetBlocked a VLESS user with a non-empty Email, or restores it when blocked
+// is false. The account keeps its UUID, so its stats key and everything keyed
+// by the email survive.
+//
+// The stored record is replaced with a copy rather than written in place: the
+// hot path holds the record it authenticated with without a lock, so mutating
+// it would be a data race against every flow reading it.
+func (v *MemoryValidator) SetBlocked(e string, blocked bool) error {
+	if e == "" {
+		return errors.New("Email must not be empty.")
 	}
+	le := strings.ToLower(e)
+	u, _ := v.email.Load(le)
+	if u == nil {
+		return errors.New("User ", e, " not found.")
+	}
+	old := u.(*protocol.MemoryUser)
+	if old.Disabled == blocked {
+		return nil
+	}
+	updated := *old
+	updated.Disabled = blocked
+	// The UUID map is where authentication reads, so it goes first: from the
+	// moment it answers, no new flow can get in as this account.
+	v.users.Store(ProcessUUID(updated.Account.(*MemoryAccount).ID.UUID()), &updated)
+	v.email.Store(le, &updated)
 	return nil
 }
 
-// Get a VLESS user with email, nil if user doesn't exist.
+// Get a VLESS user with UUID, nil if user doesn't exist or is blocked. A
+// blocked account answers exactly like an unknown UUID, so the refusal gives
+// the client no hint that the account exists.
+func (v *MemoryValidator) Get(id uuid.UUID) *protocol.MemoryUser {
+	u, _ := v.users.Load(ProcessUUID(id))
+	if u == nil {
+		return nil
+	}
+	mu := u.(*protocol.MemoryUser)
+	if mu.Disabled {
+		return nil
+	}
+	return mu
+}
+
+// Get a VLESS user with email, nil if user doesn't exist. A blocked user is
+// still returned: the user API has to be able to show an account the operator
+// suspended.
 func (v *MemoryValidator) GetByEmail(email string) *protocol.MemoryUser {
 	email = strings.ToLower(email)
 	u, _ := v.email.Load(email)

@@ -1,0 +1,182 @@
+package openconnect
+
+import (
+	"context"
+	"net/netip"
+
+	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/protocol"
+	"github.com/xtls/xray-core/proxy"
+	"google.golang.org/protobuf/proto"
+)
+
+var (
+	_ proxy.UserManager          = (*Server)(nil)
+	_ proxy.BlockableUserManager = (*Server)(nil)
+)
+
+// AddUser implements proxy.UserManager: the account becomes usable on the
+// running inbound, no restart involved. The stored copy is a clone, so a later
+// mutation of the message the caller handed over cannot reach the live store.
+func (s *Server) AddUser(ctx context.Context, mu *protocol.MemoryUser) error {
+	acc, ok := mu.Account.(*MemoryAccount)
+	if !ok {
+		return errors.New("not an OpenConnect account: ", mu.Email)
+	}
+	// Email is the universal key of the user API (GetUser/RemoveUser take it),
+	// so for this inbound it has to name the account outright.
+	if mu.Email != acc.user.Name {
+		return errors.New("email ", mu.Email, " does not match the user name ", acc.user.Name)
+	}
+	u := proto.Clone(acc.user).(*User)
+	// The general contract carries the block on MemoryUser, this protocol
+	// carries it on its own User: set both, or an add that arrives blocked
+	// would only look blocked through the API.
+	if mu.Disabled {
+		u.Disabled = proto.Bool(true)
+	}
+	prefix, err := netip.ParsePrefix(s.conf.Subnet)
+	if err != nil {
+		return errors.New("invalid subnet: ", s.conf.Subnet).Base(err)
+	}
+	if err := s.conf.checkUser(u, prefix, s.conf.groupNames()); err != nil {
+		return err
+	}
+	// Claim the static address before touching the store, so a rejected add
+	// never leaves an address reserved and an accepted one never races a live
+	// session for the same virtual IP.
+	var claimed netip.Addr
+	if u.Ip != "" {
+		// checkUser accepted the address as an in-subnet host address already.
+		if ip, err := netip.ParseAddr(u.Ip); err == nil {
+			if !s.registry.pool.tryReserve(ip) {
+				return errors.New("user ", u.Name, ": static ip ", u.Ip, " is in use by a live session")
+			}
+			claimed = ip
+		}
+	}
+	// Giving the address back is idempotent: a failed add leaves the claim for
+	// the path below, a failed write leaves it to the undo.
+	releaseClaim := func() {
+		if !claimed.IsValid() {
+			return
+		}
+		s.registry.pool.release(claimed)
+		claimed = netip.Addr{}
+	}
+	// The account is not taken back when the add itself fails: it was never
+	// stored, and on a duplicate the name belongs to the account that already
+	// has it.
+	err = s.mutateUsers(func() error { return s.users.add(u) }, func() error {
+		_, err := s.users.remove(u.Name)
+		releaseClaim()
+		return err
+	})
+	if err != nil {
+		releaseClaim()
+		return err
+	}
+	errors.LogInfo(ctx, "openconnect: user ", u.Name, " added")
+	return nil
+}
+
+// RemoveUser implements proxy.UserManager. The account is gone from the
+// running inbound and its live tunnels are cut with it.
+func (s *Server) RemoveUser(ctx context.Context, email string) error {
+	var u *User
+	// Nothing destructive happens before the write — the address is still
+	// reserved and no session was cut — so putting the account back is a
+	// complete rollback, and the only one that keeps memory and the file in
+	// step: the file still holds the user.
+	err := s.mutateUsers(func() error {
+		var err error
+		u, err = s.users.remove(email)
+		return err
+	}, func() error {
+		return s.users.add(u)
+	})
+	if err != nil {
+		return err
+	}
+	// The sessions are cut before the static address returns to the pool:
+	// released first, a concurrent dynamic alloc could hand the address to
+	// another user while the removed user's tunnels were still on it.
+	n := s.registry.disconnectUser(ctx, u.Name, "user removed")
+	if u.Ip != "" {
+		// Undo the config-time reservation. Sessions of this user never
+		// released the address themselves: releaseLease skips static users.
+		if ip, err := netip.ParseAddr(u.Ip); err == nil {
+			s.registry.pool.release(ip)
+		}
+	}
+	errors.LogInfo(ctx, "openconnect: user ", u.Name, " removed, ", n, " session(s) disconnected")
+	return nil
+}
+
+// SetUserBlocked implements proxy.BlockableUserManager. Blocking keeps the
+// account, its credential, its static address and its stats key, but the user
+// can no longer authenticate, can no longer resume on a live cookie, and loses
+// the tunnels it has up right now.
+func (s *Server) SetUserBlocked(ctx context.Context, email string, blocked bool) error {
+	var (
+		u          *User
+		wasBlocked bool
+	)
+	err := s.mutateUsers(func() error {
+		if au, ok := s.users.lookup(email); ok {
+			wasBlocked = au.user.GetDisabled()
+		}
+		var err error
+		u, err = s.users.setBlocked(email, blocked)
+		return err
+	}, func() error {
+		// Back to exactly the flag that was there, which is what the file on
+		// disk still says.
+		_, err := s.users.setBlocked(email, wasBlocked)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if !blocked {
+		errors.LogInfo(ctx, "openconnect: user ", u.Name, " unblocked")
+		return nil
+	}
+	n := s.registry.disconnectUser(ctx, u.Name, "user blocked")
+	errors.LogInfo(ctx, "openconnect: user ", u.Name, " blocked, ", n, " session(s) disconnected")
+	return nil
+}
+
+// GetUser implements proxy.UserManager. A blocked user is still returned: the
+// API has to be able to show an account the operator suspended.
+func (s *Server) GetUser(ctx context.Context, email string) *protocol.MemoryUser {
+	au, ok := s.users.lookup(email)
+	if !ok {
+		return nil
+	}
+	return memoryUser(au)
+}
+
+// GetUsers implements proxy.UserManager.
+func (s *Server) GetUsers(ctx context.Context) []*protocol.MemoryUser {
+	all := s.users.snapshot()
+	out := make([]*protocol.MemoryUser, 0, len(all))
+	for _, au := range all {
+		out = append(out, memoryUser(au))
+	}
+	return out
+}
+
+// GetUsersCount implements proxy.UserManager.
+func (s *Server) GetUsersCount(ctx context.Context) int64 {
+	return s.users.count()
+}
+
+// memoryUser re-wraps a stored account as the form the user API exchanges.
+func memoryUser(au *authUser) *protocol.MemoryUser {
+	return &protocol.MemoryUser{
+		Account:  &MemoryAccount{user: au.user, cred: au.cred},
+		Email:    au.user.Name,
+		Disabled: au.user.GetDisabled(),
+	}
+}

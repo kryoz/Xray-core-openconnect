@@ -38,6 +38,10 @@ type VLessInboundConfig struct {
 	Flow               string                  `json:"flow"`
 	Testseed           []uint32                `json:"testseed"`
 	MaxSessionsPerUser uint32                  `json:"maxSessionsPerUser"`
+	// Path to the file holding this inbound's accounts. When set it is the
+	// source of users: seeded from "clients" on first start, rewritten by the
+	// management API, so runtime changes survive a restart.
+	UsersFile string `json:"usersFile,omitempty"`
 }
 
 // Build implements Buildable
@@ -105,6 +109,7 @@ func (c *VLessInboundConfig) Build() (proto.Message, error) {
 	}
 
 	config.MaxSessionsPerUser = c.MaxSessionsPerUser
+	config.UsersFile = c.UsersFile
 	config.Decryption = c.Decryption
 	if !func() bool {
 		s := strings.Split(config.Decryption, ".")

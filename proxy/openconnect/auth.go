@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/xtls/xray-core/common/errors"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -47,12 +48,19 @@ func newUserStore(users []*User) (*userStore, error) {
 	return s, nil
 }
 
+// check verifies a password against the stored credential. A disabled account
+// is answered exactly like a wrong password: the same false, the same dummy
+// comparison, and the same strike in the auth limiter, so the endpoint cannot
+// be used to learn that an account exists but is blocked.
 func (s *userStore) check(name, password string) bool {
 	s.mu.RLock()
 	au, ok := s.users[name]
 	s.mu.RUnlock()
-	if !ok {
-		// Burn comparable time to reduce user-enumeration timing signal.
+	if !ok || au.user.GetDisabled() {
+		// Burn a comparison, so a miss costs like a wrong password. It burns the
+		// SHA-256 shape: an MD5-crypt account costs a thousand rounds more, and
+		// matching that would mean paying it on every miss as well. The auth
+		// limiter's strikes are what bound enumeration, not this line.
 		dummy := &credential{}
 		dummy.check(password)
 		return false
@@ -68,6 +76,100 @@ func (s *userStore) userByName(name string) *User {
 		return nil
 	}
 	return au.user
+}
+
+// add inserts a runtime-created user. Name and static-IP conflicts are checked
+// under the same write lock as the insert: two concurrent AddUser calls must
+// not both pass a pre-check and leave one virtual address behind two accounts.
+func (s *userStore) add(u *User) error {
+	if u.Name == "" {
+		return errors.New("user name must not be empty")
+	}
+	cred, err := parseCredential(u.Password)
+	if err != nil {
+		return errors.New("user ", u.Name, ": ").Base(err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, dup := s.users[u.Name]; dup {
+		return errors.New("duplicate user: ", u.Name)
+	}
+	if u.Ip != "" {
+		for _, other := range s.users {
+			if other.user.Ip == u.Ip {
+				return errors.New("duplicate static ip ", u.Ip, " for users ", other.user.Name, " and ", u.Name)
+			}
+		}
+	}
+	s.users[u.Name] = &authUser{cred: cred, user: u}
+	return nil
+}
+
+// remove drops a user and returns it, so the caller can release its static IP
+// and disconnect its sessions. The last user cannot be removed: validate()
+// requires at least one, so deleting it would make the next start fail. The
+// offline CLI refuses for the same reason.
+func (s *userStore) remove(name string) (*User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	au, ok := s.users[name]
+	if !ok {
+		return nil, errors.New("user ", name, " not found")
+	}
+	if len(s.users) == 1 {
+		return nil, errors.New("refusing to remove the last user; the inbound requires at least one")
+	}
+	delete(s.users, name)
+	return au.user, nil
+}
+
+// setBlocked flips the disabled flag and returns the stored user. This is the
+// single point where a block takes effect: authentication, the CONNECT resume
+// re-check and the API all read the flag from here.
+func (s *userStore) setBlocked(name string, blocked bool) (*User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	au, ok := s.users[name]
+	if !ok {
+		return nil, errors.New("user ", name, " not found")
+	}
+	if au.user.GetDisabled() == blocked {
+		return au.user, nil
+	}
+	// Clone instead of writing the field: sessions and API readers hold this
+	// *User, and a proto message is not safe to mutate while it is read.
+	next := proto.Clone(au.user).(*User)
+	next.Disabled = &blocked
+	s.users[name] = &authUser{cred: au.cred, user: next}
+	return next, nil
+}
+
+// lookup resolves a user for the checks that need existence and the disabled
+// flag together: the CONNECT resume re-check and the API.
+func (s *userStore) lookup(name string) (*authUser, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	au, ok := s.users[name]
+	return au, ok
+}
+
+// snapshot returns the stored users. The returned authUser values are never
+// mutated in place, so they stay consistent after the lock is dropped.
+func (s *userStore) snapshot() []*authUser {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*authUser, 0, len(s.users))
+	for _, au := range s.users {
+		out = append(out, au)
+	}
+	return out
+}
+
+// count reports how many accounts the inbound holds.
+func (s *userStore) count() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return int64(len(s.users))
 }
 
 // authLimiter blocks an IP after too many failed authentications in a window.

@@ -23,20 +23,42 @@ const (
 	DefaultCookieTimeout = 300
 )
 
-// credential is a parsed user password: salted SHA-256.
+// credential is a parsed user password: either salted SHA-256 (salt and hash)
+// or MD5-crypt (md5Salt and md5Digest). The split is done once at parse time so
+// the authentication path neither re-parses nor branches on string shapes.
 type credential struct {
 	salt []byte
 	hash [sha256.Size]byte
+
+	md5Salt   string
+	md5Digest string
 }
 
 // check verifies the stored hash against a candidate password in constant time.
 func (c *credential) check(password string) bool {
+	if c.md5Digest != "" {
+		return verifyMD5Crypt(password, c.md5Salt, c.md5Digest)
+	}
 	sum := sha256.Sum256(append(append([]byte{}, c.salt...), password...))
 	return subtle.ConstantTimeCompare(c.hash[:], sum[:]) == 1
 }
 
-// parseCredential decodes a "salt_hex$hash_hex" password field.
+// parseCredential decodes a stored password field. Two formats are accepted,
+// because the same value has to verify here and in ocserv:
+//
+//   - "salt_hex$hash_hex": salted SHA-256, what GenerateCredential mints;
+//   - "$1$salt$digest": MD5-crypt, what an ocpasswd file holds.
+//
+// The prefix decides, and the two cannot be confused: a hex salt cannot
+// contain '$'.
 func parseCredential(field string) (*credential, error) {
+	if strings.HasPrefix(field, md5CryptPrefix) {
+		salt, digest, ok := splitMD5Crypt(field)
+		if !ok {
+			return nil, errors.New("malformed MD5-crypt password, want $1$<salt 1-8 chars>$<22 chars>")
+		}
+		return &credential{md5Salt: salt, md5Digest: digest}, nil
+	}
 	saltHex, hashHex, ok := strings.Cut(field, "$")
 	if !ok {
 		return nil, errors.New("password must be formatted as salt_hex$hash_hex")
@@ -108,44 +130,21 @@ func (c *OpenConnectInboundConfig) validate() error {
 	seen := make(map[string]struct{}, len(c.Users))
 	staticIPs := make(map[netip.Addr]string, len(c.Users))
 	for _, u := range c.Users {
-		if u.Name == "" {
-			return errors.New("user name must not be empty")
+		if err := c.checkUser(u, prefix, groupNames); err != nil {
+			return err
 		}
 		if _, dup := seen[u.Name]; dup {
 			return errors.New("duplicate user: ", u.Name)
 		}
 		seen[u.Name] = struct{}{}
-		if _, err := parseCredential(u.Password); err != nil {
-			return errors.New("user ", u.Name, ": ").Base(err)
-		}
 		if u.Ip != "" {
-			ip, err := netip.ParseAddr(u.Ip)
-			if err != nil {
-				return errors.New("user ", u.Name, ": invalid static ip: ", u.Ip).Base(err)
-			}
-			if !prefix.Contains(ip) {
-				return errors.New("user ", u.Name, ": static ip ", u.Ip, " outside subnet ", c.Subnet)
-			}
-			if ip == prefix.Addr() || ip == ipv4Broadcast(prefix) {
-				return errors.New("user ", u.Name, ": static ip ", u.Ip, " is a network/broadcast address")
-			}
-			if ip == firstHost(prefix) {
-				return errors.New("user ", u.Name, ": static ip ", u.Ip, " is the gateway/DNS address of the subnet")
-			}
+			// checkUser has already accepted the address as an in-subnet host
+			// address, so the parse cannot fail here.
+			ip, _ := netip.ParseAddr(u.Ip)
 			if other, dup := staticIPs[ip]; dup {
 				return errors.New("duplicate static ip ", u.Ip, " for users ", other, " and ", u.Name)
 			}
 			staticIPs[ip] = u.Name
-		}
-		for _, r := range u.Routes {
-			if err := validateRoute(r); err != nil {
-				return errors.New("user ", u.Name, ": ").Base(err)
-			}
-		}
-		if u.Group != "" {
-			if _, ok := groupNames[u.Group]; !ok {
-				return errors.New("user ", u.Name, ": unknown route group: ", u.Group)
-			}
 		}
 	}
 	for _, r := range c.Routes {
@@ -165,6 +164,59 @@ func (c *OpenConnectInboundConfig) validate() error {
 		return errors.New("mtu out of range [", MinMTU, ",", MaxMTU, "]: ", c.Mtu)
 	}
 	return nil
+}
+
+// checkUser validates one user against the inbound it belongs to: the name,
+// the credential format, a static IP that is a usable host address of the
+// subnet, the user's own routes, and a group that exists. Cross-user rules are
+// the caller's business: validate() enforces unique names and unique static
+// IPs across the config, a runtime add enforces them against the live store.
+//
+// Both paths share it so that an account added to a running inbound can never
+// be something the next start would refuse to load.
+func (c *OpenConnectInboundConfig) checkUser(u *User, prefix netip.Prefix, groups map[string]struct{}) error {
+	if u.Name == "" {
+		return errors.New("user name must not be empty")
+	}
+	if _, err := parseCredential(u.Password); err != nil {
+		return errors.New("user ", u.Name, ": ").Base(err)
+	}
+	if u.Ip != "" {
+		ip, err := netip.ParseAddr(u.Ip)
+		if err != nil {
+			return errors.New("user ", u.Name, ": invalid static ip: ", u.Ip).Base(err)
+		}
+		if !prefix.Contains(ip) {
+			return errors.New("user ", u.Name, ": static ip ", u.Ip, " outside subnet ", c.Subnet)
+		}
+		if ip == prefix.Addr() || ip == ipv4Broadcast(prefix) {
+			return errors.New("user ", u.Name, ": static ip ", u.Ip, " is a network/broadcast address")
+		}
+		if ip == firstHost(prefix) {
+			return errors.New("user ", u.Name, ": static ip ", u.Ip, " is the gateway/DNS address of the subnet")
+		}
+	}
+	for _, r := range u.Routes {
+		if err := validateRoute(r); err != nil {
+			return errors.New("user ", u.Name, ": ").Base(err)
+		}
+	}
+	if u.Group != "" {
+		if _, ok := groups[u.Group]; !ok {
+			return errors.New("user ", u.Name, ": unknown route group: ", u.Group)
+		}
+	}
+	return nil
+}
+
+// groupNames returns the set of route groups the inbound defines. validate()
+// builds its own while checking the groups for duplicates.
+func (c *OpenConnectInboundConfig) groupNames() map[string]struct{} {
+	names := make(map[string]struct{}, len(c.Groups))
+	for _, g := range c.Groups {
+		names[g.Name] = struct{}{}
+	}
+	return names
 }
 
 // routesFor resolves the split-routing networks for a user's session:

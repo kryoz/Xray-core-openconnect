@@ -7,11 +7,13 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/protocol"
+	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/proxy"
 	grpc "google.golang.org/grpc"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // InboundOperation is the interface for operations that applies to inbound handlers.
@@ -48,6 +50,14 @@ func (op *AddUserOperation) ApplyInbound(ctx context.Context, handler inbound.Ha
 	if err != nil {
 		return errors.New("failed to parse user").Base(err)
 	}
+	// A block travels in the general user contract, but only a manager that
+	// can enforce one honours it. Adding the account to any other protocol
+	// would hand the operator an entry that reads as blocked and works.
+	if mUser.Disabled {
+		if _, ok := p.(proxy.BlockableUserManager); !ok {
+			return errors.New("proxy does not support blocked users, refuse to add ", mUser.Email, " as one")
+		}
+	}
 	return um.AddUser(ctx, mUser)
 }
 
@@ -62,6 +72,19 @@ func (op *RemoveUserOperation) ApplyInbound(ctx context.Context, handler inbound
 		return errors.New("proxy is not a UserManager")
 	}
 	return um.RemoveUser(ctx, op.Email)
+}
+
+// ApplyInbound implements InboundOperation.
+func (op *BlockUserOperation) ApplyInbound(ctx context.Context, handler inbound.Handler) error {
+	p, err := getInbound(handler)
+	if err != nil {
+		return err
+	}
+	um, ok := p.(proxy.BlockableUserManager)
+	if !ok {
+		return errors.New("proxy is not a BlockableUserManager")
+	}
+	return um.SetUserBlocked(ctx, op.Email, op.Blocked)
 }
 
 type handlerServer struct {
@@ -122,6 +145,46 @@ func (s *handlerServer) ListInbounds(ctx context.Context, request *ListInboundsR
 	return response, nil
 }
 
+// redactUser masks the credential an account carries. The commander socket is
+// not authenticated, and an OpenConnect account is a salted hash: handed out,
+// it can be attacked offline at leisure. Everything the operator lists users
+// for — name, static address, group, the block flag — survives; the secret
+// does not.
+//
+// In its place goes a fingerprint, because the loop reading this listing has to
+// notice that an account's credential changed. It can: a customer who changed
+// their password is still authenticated by the old one until the inbound is
+// rewritten, and this listing is the only place the loop can learn that. The
+// digest answers that without anything reversible leaving the node.
+//
+// The user passed in was just built by protocol.ToProtoUser, so writing to it
+// cannot reach the live store.
+func redactUser(u *protocol.User) *protocol.User {
+	if u == nil || u.Account == nil {
+		return u
+	}
+	raw, err := u.Account.GetInstance()
+	if err != nil {
+		// An account this build cannot decode cannot be inspected for a
+		// credential either, so none of it goes out.
+		u.Account = &serial.TypedMessage{Type: u.Account.Type}
+		return u
+	}
+	ref := raw.ProtoReflect()
+	if fd := ref.Descriptor().Fields().ByName("password"); fd != nil && fd.Kind() == protoreflect.StringKind {
+		// An account carrying no credential keeps reporting none. A digest of
+		// the empty string would read as a credential the loop could match
+		// against, and an absent one is what tells the loop to compare nothing.
+		if secret := ref.Get(fd).String(); secret != "" {
+			ref.Set(fd, protoreflect.ValueOfString(protocol.CredentialFingerprint(secret)))
+		} else {
+			ref.Clear(fd)
+		}
+	}
+	u.Account = serial.ToTypedMessage(raw)
+	return u
+}
+
 func (s *handlerServer) GetInboundUsers(ctx context.Context, request *GetInboundUserRequest) (*GetInboundUserResponse, error) {
 	handler, err := s.ihm.GetHandler(ctx, request.Tag)
 	if err != nil {
@@ -136,12 +199,12 @@ func (s *handlerServer) GetInboundUsers(ctx context.Context, request *GetInbound
 		return nil, errors.New("proxy is not a UserManager")
 	}
 	if len(request.Email) > 0 {
-		return &GetInboundUserResponse{Users: []*protocol.User{protocol.ToProtoUser(um.GetUser(ctx, request.Email))}}, nil
+		return &GetInboundUserResponse{Users: []*protocol.User{redactUser(protocol.ToProtoUser(um.GetUser(ctx, request.Email)))}}, nil
 	}
 	result := make([]*protocol.User, 0, 100)
 	users := um.GetUsers(ctx)
 	for _, u := range users {
-		result = append(result, protocol.ToProtoUser(u))
+		result = append(result, redactUser(protocol.ToProtoUser(u)))
 	}
 	return &GetInboundUserResponse{Users: result}, nil
 }

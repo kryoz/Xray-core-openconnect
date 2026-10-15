@@ -27,6 +27,7 @@ import (
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/signal"
 	"github.com/xtls/xray-core/common/task"
+	"github.com/xtls/xray-core/common/userstore"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features"
 	"github.com/xtls/xray-core/features/dns"
@@ -58,6 +59,32 @@ func init() {
 
 		c := config.(*Config)
 
+		// The overlay, when configured, is the source of accounts: seeded from
+		// "users" on the first start, read back on every one after it, so an
+		// account the API removed does not come back from the config.
+		// The seed is validated the same way the init loop below loads it —
+		// parseable accounts, no duplicate emails — before it is written: the
+		// file outlives the failed start, and once it exists it, not the
+		// config, is what the next start reads.
+		validateSeed := func(seed []*protocol.User) error {
+			probe := new(vless.MemoryValidator)
+			for _, user := range seed {
+				u, err := user.ToMemoryUser()
+				if err != nil {
+					return err
+				}
+				if err := probe.Add(u); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		users, err := userstore.LoadOrSeed(c.UsersFile, c.Users, validateSeed)
+		if err != nil {
+			return nil, errors.New("failed to load VLESS users").Base(err)
+		}
+		c.Users = users
+
 		validator := new(vless.MemoryValidator)
 		for _, user := range c.Users {
 			u, err := user.ToMemoryUser()
@@ -72,6 +99,8 @@ func init() {
 		return New(ctx, c, dc, validator)
 	}))
 }
+
+var _ proxy.BlockableUserManager = (*Handler)(nil)
 
 // Handler is an inbound connection handler that handles messages in VLess protocol.
 type Handler struct {
@@ -88,6 +117,17 @@ type Handler struct {
 	// regexps               map[string]*regexp.Regexp       // or nil
 	// sessions bounds max_sessions_per_user: live flows per account email.
 	sessions userSessionLimiter
+	// flows tracks the live connection of each account, so that blocking or
+	// removing a user reaches the flows that are up right now.
+	flows flowRegistry
+	// usersFile is the overlay the accounts are kept in, so that what the user
+	// API changes survives a restart. Empty means the config is the only
+	// source and runtime changes die with the process.
+	usersFile string
+	// mutationMu makes a change to the validator and its write to the users
+	// overlay one step, so memory and the file can never be seen disagreeing by
+	// a concurrent management call.
+	mutationMu sync.Mutex
 }
 
 // New creates a new VLess inbound handler.
@@ -102,6 +142,7 @@ func New(ctx context.Context, config *Config, dc dns.Client, validator vless.Val
 		observer:               v.GetFeature(extension.ObservatoryType()),
 		defaultDispatcher:      v.GetFeature(routing.DispatcherType()).(routing.Dispatcher),
 		ctx:                    ctx,
+		usersFile:              config.UsersFile,
 	}
 
 	handler.sessions = newUserSessionLimiter(int(config.MaxSessionsPerUser))
@@ -229,6 +270,74 @@ func (l *userSessionLimiter) release(email string) {
 	}
 }
 
+// flowRegistry tracks the live connection of each account by email, so that
+// the user API can cut them: a block or a removal has to reach the flows that
+// are up right now, not only the client's next connection.
+//
+// closeAll copies the closers out and closes them once the mutex is released.
+// Closing wakes the flow that owns the connection, and that flow unregisters
+// itself on its way out — closing under the lock would have it wait for a
+// mutex the closer already holds.
+type flowRegistry struct {
+	mu    sync.Mutex
+	conns map[string][]io.Closer
+}
+
+// add registers the live connection of email and returns what unregisters it
+// again, which the flow defers. available reports whether the account is still
+// usable and is consulted under this mutex, sharing it with closeAll: a flow
+// authenticates before it registers here, so without that check an operator
+// action landing in between would leave exactly this flow alive. An account
+// without an email cannot be addressed by the user API, so its flows are not
+// tracked at all. Emails match case-insensitively, the way the validator
+// matches them, so an operator typing another case still reaches the flows.
+func (r *flowRegistry) add(email string, conn io.Closer, available func() bool) (remove func(), ok bool) {
+	if email == "" {
+		return func() {}, true
+	}
+	email = strings.ToLower(email)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !available() {
+		return nil, false
+	}
+	if r.conns == nil {
+		r.conns = make(map[string][]io.Closer)
+	}
+	r.conns[email] = append(r.conns[email], conn)
+	return func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		list := r.conns[email]
+		for i, c := range list {
+			if c != conn {
+				continue
+			}
+			if len(list) == 1 {
+				delete(r.conns, email)
+			} else {
+				r.conns[email] = append(list[:i], list[i+1:]...)
+			}
+			return
+		}
+	}, true
+}
+
+// closeAll cuts every live flow of email and reports how many it closed. The
+// caller has to make the account unusable first: closeAll only deals with what
+// is already connected.
+func (r *flowRegistry) closeAll(email string) int {
+	email = strings.ToLower(email)
+	r.mu.Lock()
+	conns := r.conns[email]
+	delete(r.conns, email)
+	r.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+	return len(conns)
+}
+
 func isMuxAndNotXUDP(request *protocol.RequestHeader, first *buf.Buffer) bool {
 	if request.Command != protocol.RequestCommandMux {
 		return false
@@ -290,13 +399,76 @@ func (h *Handler) Close() error {
 
 // AddUser implements proxy.UserManager.AddUser().
 func (h *Handler) AddUser(ctx context.Context, u *protocol.MemoryUser) error {
-	return h.validator.Add(u)
+	// An account with no email cannot be addressed by the user API, so it could
+	// not be taken back out should the write below fail.
+	if h.usersFile != "" && u.Email == "" {
+		return errors.New("an account of an inbound with usersFile must have an email")
+	}
+	err := h.mutateUsers(func() error { return h.validator.Add(u) }, func() error {
+		// An account that works until the next restart is worse than none: take
+		// it back so memory and the file say the same thing.
+		return h.validator.Del(u.Email)
+	})
+	if err != nil {
+		return err
+	}
+	errors.LogInfo(ctx, "vless: user ", u.Email, " added")
+	return nil
 }
 
-// RemoveUser implements proxy.UserManager.RemoveUser().
+// RemoveUser implements proxy.UserManager.RemoveUser(). The account is gone
+// from the running inbound, and the flows it has up are cut with it.
 func (h *Handler) RemoveUser(ctx context.Context, e string) error {
-	h.RemoveReverse(h.validator.GetByEmail(e))
-	return h.validator.Del(e)
+	// Nothing else has been touched — the reverse binding is still in place and
+	// no flow was cut — so putting the account back is a complete rollback, and
+	// the only one that keeps memory and the file in step: the file still holds
+	// the user.
+	var u *protocol.MemoryUser
+	err := h.mutateUsers(func() error {
+		u = h.validator.GetByEmail(e)
+		return h.validator.Del(e)
+	}, func() error {
+		if u == nil {
+			return nil
+		}
+		return h.validator.Add(u)
+	})
+	if err != nil {
+		return err
+	}
+	h.RemoveReverse(u)
+	n := h.flows.closeAll(e)
+	errors.LogInfo(ctx, "vless: user ", e, " removed, ", n, " flow(s) closed")
+	return nil
+}
+
+// SetUserBlocked implements proxy.BlockableUserManager.SetUserBlocked(). The
+// account keeps its UUID, its reverse binding and its stats key, but it stops
+// authenticating: new flows are refused the way an unknown UUID is, and the
+// flows it has up right now are cut.
+func (h *Handler) SetUserBlocked(ctx context.Context, email string, blocked bool) error {
+	// The store first, the cuts second: from that point on nothing new of this
+	// account gets in, so what closeAll finds is all there is.
+	var wasBlocked bool
+	err := h.mutateUsers(func() error {
+		current := h.validator.GetByEmail(email)
+		wasBlocked = current != nil && current.Disabled
+		return h.validator.SetBlocked(email, blocked)
+	}, func() error {
+		// Back to exactly the flag that was there, which is what the file on
+		// disk still says.
+		return h.validator.SetBlocked(email, wasBlocked)
+	})
+	if err != nil {
+		return err
+	}
+	if !blocked {
+		errors.LogInfo(ctx, "vless: user ", email, " unblocked")
+		return nil
+	}
+	n := h.flows.closeAll(email)
+	errors.LogInfo(ctx, "vless: user ", email, " blocked, ", n, " flow(s) closed")
+	return nil
 }
 
 // GetUser implements proxy.UserManager.GetUser().
@@ -580,8 +752,9 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	// known only after the header decodes, so the slot is acquired here and
 	// released when this flow ends: Process blocks for the whole lifetime of
 	// the TCP/UDP flow, so the deferred release is the flow's end. A rejected
-	// flow gets a closed connection — the only refusal a VLESS client can see;
-	// live flows are never cut.
+	// flow gets a closed connection — the only refusal a VLESS client can see.
+	// Live flows are not cut on their own; the user API cuts them when an
+	// operator blocks or removes the account, see flowRegistry.
 	if !h.sessions.tryAcquire(request.User.Email) {
 		err := errors.New("max sessions per user reached for ", request.User.Email)
 		errors.LogWarning(ctx, "vless: max sessions per user reached, rejecting flow from ", connection.RemoteAddr(), " for ", request.User.Email)
@@ -594,6 +767,27 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 		return err
 	}
 	defer h.sessions.release(request.User.Email)
+
+	// Register the flow so that the user API can cut it. The account is
+	// re-checked here, under the registry mutex, because it was authenticated
+	// a moment ago and a block could have landed since: see flowRegistry.add.
+	flowUser := request.User
+	removeFlow, tracked := h.flows.add(flowUser.Email, connection, func() bool {
+		u := h.validator.GetByEmail(flowUser.Email)
+		return u != nil && !u.Disabled
+	})
+	if !tracked {
+		err := errors.New("user ", flowUser.Email, " is blocked or removed")
+		errors.LogWarning(ctx, "vless: rejecting flow from ", connection.RemoteAddr(), ": ", err)
+		log.Record(&log.AccessMessage{
+			From:   connection.RemoteAddr(),
+			To:     "",
+			Status: log.AccessRejected,
+			Reason: err,
+		})
+		return err
+	}
+	defer removeFlow()
 
 	if err := connection.SetReadDeadline(time.Time{}); err != nil {
 		errors.LogWarningInner(ctx, err, "unable to set back read deadline")

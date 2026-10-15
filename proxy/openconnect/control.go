@@ -238,7 +238,15 @@ func (s *Server) handleAuth(tc *tls.Conn, req *httpReq, peerIP string, pending *
 	}
 	s.limiter.reset(peerIP)
 
-	u := s.users.userByName(user)
+	au, ok := s.users.lookup(user)
+	if !ok {
+		// The account was removed between the password check and this line.
+		// Answer as a failed login: without it the client would get a session
+		// for a user that no longer exists.
+		_ = writeHTTP(tc, 401, "text/xml; charset=utf-8", nil, failMsg)
+		return
+	}
+	u := au.user
 
 	// max_clients bounds live tunnels, not session records: a session inside its
 	// resume window without a tunnel holds an IP lease, not a client slot.
@@ -296,6 +304,24 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq) {
 		_ = writeHTTP(tc, 401, "text/plain", nil, "unauthorized")
 		return
 	}
+	// Resume skips the auth forms, so the account must be checked again here:
+	// a user removed or blocked after this session was created would otherwise
+	// walk back into the tunnel on a cookie that stays valid for
+	// cookie_timeout seconds. Dropping the session takes the cookie with it, so
+	// the client is forced to authenticate, where it is refused for good.
+	au, ok := s.users.lookup(sess.userName())
+	if !ok || au.user.GetDisabled() {
+		why := "blocked"
+		if !ok {
+			why = "removed"
+		}
+		s.registry.disconnectUser(s.ctx, sess.userName(), "user is no longer allowed")
+		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: CONNECT refused for %s: account %s", sess.userName(), why))
+		_ = writeHTTP(tc, 401, "text/plain", nil, "unauthorized")
+		return
+	}
+	u := au.user
+
 	// Resume: a valid cookie lets the client skip the auth forms. Reject once
 	// the cookie/resume window (cookie_timeout after the last disconnect) has elapsed.
 	if sess.expired(time.Now(), time.Duration(s.cookieTimeoutSecs())*time.Second) {
@@ -308,7 +334,7 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq) {
 	// The per-account limit re-checked here: a resume skips the auth forms
 	// entirely. sess.sid is excepted because a re-CONNECT replaces this
 	// session's own tunnel, which must not block it (connectedCount).
-	if lim := s.conf.maxSessionsPerUserFor(sess.user); lim > 0 && s.registry.connectedCount(sess.userName(), &sess.sid) >= int(lim) {
+	if lim := s.conf.maxSessionsPerUserFor(u); lim > 0 && s.registry.connectedCount(sess.userName(), &sess.sid) >= int(lim) {
 		errors.LogWarning(s.ctx, fmt.Sprintf("openconnect: max sessions per user reached, rejecting CONNECT from %s for %s", sess.clientIP, sess.userName()))
 		_ = writeHTTP(tc, 503, "text/plain", nil, "too many clients (account)")
 		return
@@ -318,6 +344,18 @@ func (s *Server) handleConnect(tc *tls.Conn, br *bufio.Reader, req *httpReq) {
 	// the old pump half-open, holding the device writer slot and the IP lease
 	// while the session looks disconnected.
 	gen := sess.openTunnel(tc)
+	// A block or a removal can complete between the account check above and
+	// this line: disconnectUser has already retired the session, and the kick
+	// it took found no tunnel to close. Without this check the tunnel being
+	// opened here would outlive the operator action on a session the registry
+	// no longer knows, with its IP lease possibly handed out again already.
+	if s.registry.getBySID(sess.sid) != sess {
+		errors.LogWarning(s.ctx, "openconnect: CONNECT lost the race against a block or removal for ", sess.userName())
+		_ = writeHTTP(tc, 401, "text/plain", nil, "unauthorized")
+		_ = tc.Close()
+		sess.closeTunnel(gen)
+		return
+	}
 	// Multi-frame support is per-connection: each CONNECT (including resume
 	// and rekey) re-negotiates it from the request headers, and the result
 	// lives only in this cstpPump run.
@@ -560,6 +598,14 @@ func (s *Server) cstpPump(sess *ocSession, tc *tls.Conn, br *bufio.Reader, multi
 					_ = writeFrame(acPKTKeepalive, nil)
 				}
 				continue
+			}
+			if sess.kickedByServer() {
+				// disconnectUser closed this connection because the operator
+				// blocked or removed the user. Expected, not a client-path
+				// failure, and it must not read like one in the log.
+				closeReason = "closed by the server"
+				errors.LogInfo(s.ctx, "openconnect: CSTP tunnel closed by the server for ", sess.ip, " (user ", sess.userName(), ")")
+				return
 			}
 			if sess.isSuperseded(gen) {
 				// Our own connection was closed by openTunnel: expected, not a

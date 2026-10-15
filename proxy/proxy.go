@@ -91,6 +91,17 @@ type UserManager interface {
 	GetUsersCount(context.Context) int64
 }
 
+// BlockableUserManager is a UserManager whose users can be suspended without
+// being deleted: the credential and the stats key stay in place so the same
+// account can be restored later.
+type BlockableUserManager interface {
+	UserManager
+
+	// SetUserBlocked blocks a user by email, or restores it when blocked is
+	// false. Live sessions of the user do not survive a block.
+	SetUserBlocked(context.Context, string, bool) error
+}
+
 type GetInbound interface {
 	GetInbound() Inbound
 }

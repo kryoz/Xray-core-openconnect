@@ -24,7 +24,9 @@ const (
 type User struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// Salted SHA-256, format "salt_hex$hash_hex".
+	// Stored password, verified identically to ocserv/ocpasswd. Two formats:
+	// "salt_hex$hash_hex" (salted SHA-256, what `openconnect add` mints) and
+	// "$1$salt$digest" (MD5-crypt, what an existing ocpasswd file holds).
 	Password string `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
 	// Optional static IP address assigned to this user.
 	Ip string `protobuf:"bytes,3,opt,name=ip,proto3" json:"ip,omitempty"`
@@ -44,8 +46,13 @@ type User struct {
 	// Live-tunnel bound for this account (0 = unlimited). Overrides the
 	// group's max_sessions_per_user, which overrides the inbound-level one.
 	MaxSessionsPerUser *uint32 `protobuf:"varint,8,opt,name=max_sessions_per_user,json=maxSessionsPerUser,proto3,oneof" json:"max_sessions_per_user,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Soft block: authentication rejects the account but its credential and
+	// stats key stay in place, so the operator can suspend and restore a user
+	// without losing either. A live tunnel is cut and a cookie holder is no
+	// longer resumed.
+	Disabled      *bool `protobuf:"varint,9,opt,name=disabled,proto3,oneof" json:"disabled,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *User) Reset() {
@@ -125,6 +132,13 @@ func (x *User) GetMaxSessionsPerUser() uint32 {
 		return *x.MaxSessionsPerUser
 	}
 	return 0
+}
+
+func (x *User) GetDisabled() bool {
+	if x != nil && x.Disabled != nil {
+		return *x.Disabled
+	}
+	return false
 }
 
 // Group is a named set of split-routing networks shared by users.
@@ -251,8 +265,15 @@ type OpenConnectInboundConfig struct {
 	// at authentication AND at CONNECT: a cookie holder resumes without
 	// re-authenticating, so the auth-time check alone would let it through.
 	MaxSessionsPerUser uint32 `protobuf:"varint,16,opt,name=max_sessions_per_user,json=maxSessionsPerUser,proto3" json:"max_sessions_per_user,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Path to the file that holds this inbound's accounts. When set, the file
+	// is the source of users: it is seeded from "users" on first start and
+	// rewritten on every change the management API makes, so add, block and
+	// remove survive a restart while the config file itself stays untouched.
+	// Empty keeps the old behavior — accounts come from "users" alone and
+	// runtime changes last until the next restart.
+	UsersFile     string `protobuf:"bytes,17,opt,name=users_file,json=usersFile,proto3" json:"users_file,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OpenConnectInboundConfig) Reset() {
@@ -383,11 +404,18 @@ func (x *OpenConnectInboundConfig) GetMaxSessionsPerUser() uint32 {
 	return 0
 }
 
+func (x *OpenConnectInboundConfig) GetUsersFile() string {
+	if x != nil {
+		return x.UsersFile
+	}
+	return ""
+}
+
 var File_proxy_openconnect_config_proto protoreflect.FileDescriptor
 
 const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\n" +
-	"\x1eproxy/openconnect/config.proto\x12\x16xray.proxy.openconnect\"\xe8\x01\n" +
+	"\x1eproxy/openconnect/config.proto\x12\x16xray.proxy.openconnect\"\x96\x02\n" +
 	"\x04User\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12\x0e\n" +
@@ -395,9 +423,11 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\x06routes\x18\x04 \x03(\tR\x06routes\x12\x14\n" +
 	"\x05group\x18\x05 \x01(\tR\x05group\x12\x13\n" +
 	"\x02l3\x18\x06 \x01(\bH\x00R\x02l3\x88\x01\x01\x126\n" +
-	"\x15max_sessions_per_user\x18\b \x01(\rH\x01R\x12maxSessionsPerUser\x88\x01\x01B\x05\n" +
+	"\x15max_sessions_per_user\x18\b \x01(\rH\x01R\x12maxSessionsPerUser\x88\x01\x01\x12\x1f\n" +
+	"\bdisabled\x18\t \x01(\bH\x02R\bdisabled\x88\x01\x01B\x05\n" +
 	"\x03_l3B\x18\n" +
-	"\x16_max_sessions_per_userJ\x04\b\a\x10\b\"\xc4\x01\n" +
+	"\x16_max_sessions_per_userB\v\n" +
+	"\t_disabledJ\x04\b\a\x10\b\"\xc4\x01\n" +
 	"\x05Group\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06routes\x18\x02 \x03(\tR\x06routes\x12\x1b\n" +
@@ -405,7 +435,7 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\x02l3\x18\x05 \x01(\bH\x00R\x02l3\x88\x01\x01\x126\n" +
 	"\x15max_sessions_per_user\x18\x06 \x01(\rH\x01R\x12maxSessionsPerUser\x88\x01\x01B\x05\n" +
 	"\x03_l3B\x18\n" +
-	"\x16_max_sessions_per_userJ\x04\b\x03\x10\x04\"\x82\x04\n" +
+	"\x16_max_sessions_per_userJ\x04\b\x03\x10\x04\"\xa1\x04\n" +
 	"\x18OpenConnectInboundConfig\x122\n" +
 	"\x05users\x18\x01 \x03(\v2\x1c.xray.proxy.openconnect.UserR\x05users\x12\x16\n" +
 	"\x06subnet\x18\x02 \x01(\tR\x06subnet\x12\x10\n" +
@@ -421,7 +451,9 @@ const file_proxy_openconnect_config_proto_rawDesc = "" +
 	"\x11camouflage_secret\x18\f \x01(\tR\x10camouflageSecret\x12)\n" +
 	"\x10camouflage_realm\x18\r \x01(\tR\x0fcamouflageRealm\x125\n" +
 	"\x06groups\x18\x0e \x03(\v2\x1d.xray.proxy.openconnect.GroupR\x06groups\x121\n" +
-	"\x15max_sessions_per_user\x18\x10 \x01(\rR\x12maxSessionsPerUserJ\x04\b\n" +
+	"\x15max_sessions_per_user\x18\x10 \x01(\rR\x12maxSessionsPerUser\x12\x1d\n" +
+	"\n" +
+	"users_file\x18\x11 \x01(\tR\tusersFileJ\x04\b\n" +
 	"\x10\vJ\x04\b\x0f\x10\x10Bd\n" +
 	"\x1acom.xray.proxy.openconnectP\x01Z+github.com/xtls/xray-core/proxy/openconnect\xaa\x02\x16Xray.Proxy.OpenConnectb\x06proto3"
 

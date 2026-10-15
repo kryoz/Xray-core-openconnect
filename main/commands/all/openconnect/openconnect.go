@@ -28,6 +28,8 @@ place; note that rewriting removes any comments it contained.
 		cmdList,
 		cmdPasswd,
 		cmdRm,
+		cmdBlock,
+		cmdUnblock,
 	},
 }
 

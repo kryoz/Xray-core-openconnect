@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package xray.common.userstore;
+option csharp_namespace = "Xray.Common.UserStore";
+option go_package = "github.com/xtls/xray-core/common/userstore";
+option java_package = "com.xray.common.userstore";
+option java_multiple_files = true;
+
+import "common/protocol/user.proto";
+
+// UserFile is the on-disk overlay an inbound with "usersFile" set keeps its
+// accounts in. It carries the very users the management API exchanges —
+// xray.common.protocol.User, the same message AddUserOperation takes — so
+// adding an account over gRPC and loading it back at start are the same
+// contract, not two formats kept in step by hand.
+//
+// Accounts hold credentials (a salted hash for OpenConnect, a UUID for VLESS),
+// so the file is written 0600 and only ever replaced atomically.
+message UserFile {
+  repeated xray.common.protocol.User users = 1;
+}

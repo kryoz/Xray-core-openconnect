@@ -16,4 +16,9 @@ message User {
   // Protocol specific account information. Must be the account proto in one of
   // the proxies.
   xray.common.serial.TypedMessage account = 3;
+
+  // Soft block: authentication rejects the account but its definition stays
+  // in place, so the operator can suspend and restore a user without losing
+  // its credential or its stats key.
+  bool disabled = 4;
 }

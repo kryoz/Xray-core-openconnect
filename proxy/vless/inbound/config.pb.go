@@ -123,8 +123,15 @@ type Config struct {
 	// slot. Excess flows get a closed connection, the only refusal a VLESS
 	// client can see; live flows are never cut.
 	MaxSessionsPerUser uint32 `protobuf:"varint,8,opt,name=max_sessions_per_user,json=maxSessionsPerUser,proto3" json:"max_sessions_per_user,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Path to the file that holds this inbound's accounts. When set, the file is
+	// the source of users: it is seeded from "users" on first start and rewritten
+	// on every change the management API makes, so add, block and remove survive
+	// a restart while the config file itself stays untouched. Empty keeps the old
+	// behavior — accounts come from "users" alone and runtime changes last until
+	// the next restart.
+	UsersFile     string `protobuf:"bytes,9,opt,name=users_file,json=usersFile,proto3" json:"users_file,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Config) Reset() {
@@ -213,6 +220,13 @@ func (x *Config) GetMaxSessionsPerUser() uint32 {
 	return 0
 }
 
+func (x *Config) GetUsersFile() string {
+	if x != nil {
+		return x.UsersFile
+	}
+	return ""
+}
+
 var File_proxy_vless_inbound_config_proto protoreflect.FileDescriptor
 
 const file_proxy_vless_inbound_config_proto_rawDesc = "" +
@@ -224,7 +238,7 @@ const file_proxy_vless_inbound_config_proto_rawDesc = "" +
 	"\x04path\x18\x03 \x01(\tR\x04path\x12\x12\n" +
 	"\x04type\x18\x04 \x01(\tR\x04type\x12\x12\n" +
 	"\x04dest\x18\x05 \x01(\tR\x04dest\x12\x12\n" +
-	"\x04xver\x18\x06 \x01(\x04R\x04xver\"\xc5\x02\n" +
+	"\x04xver\x18\x06 \x01(\x04R\x04xver\"\xe4\x02\n" +
 	"\x06Config\x120\n" +
 	"\x05users\x18\x01 \x03(\v2\x1a.xray.common.protocol.UserR\x05users\x12@\n" +
 	"\tfallbacks\x18\x02 \x03(\v2\".xray.proxy.vless.inbound.FallbackR\tfallbacks\x12\x1e\n" +
@@ -236,7 +250,9 @@ const file_proxy_vless_inbound_config_proto_rawDesc = "" +
 	"\n" +
 	"seconds_to\x18\x06 \x01(\x03R\tsecondsTo\x12\x18\n" +
 	"\apadding\x18\a \x01(\tR\apadding\x121\n" +
-	"\x15max_sessions_per_user\x18\b \x01(\rR\x12maxSessionsPerUserBj\n" +
+	"\x15max_sessions_per_user\x18\b \x01(\rR\x12maxSessionsPerUser\x12\x1d\n" +
+	"\n" +
+	"users_file\x18\t \x01(\tR\tusersFileBj\n" +
 	"\x1ccom.xray.proxy.vless.inboundP\x01Z-github.com/xtls/xray-core/proxy/vless/inbound\xaa\x02\x18Xray.Proxy.Vless.Inboundb\x06proto3"
 
 var (

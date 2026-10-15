@@ -46,10 +46,20 @@ type Server struct {
 
 	mu    sync.Mutex
 	tcpLn net.Listener
+
+	// mutationMu makes a change to the account store and its write to the users
+	// overlay one step, so memory and the file can never be seen disagreeing by
+	// a concurrent management call.
+	mutationMu sync.Mutex
 }
 
 // NewServer builds an OpenConnect inbound from its config.
 func NewServer(ctx context.Context, conf *OpenConnectInboundConfig) (*Server, error) {
+	// The overlay, if configured, decides which accounts the inbound has, so
+	// it has to be resolved before the config is validated.
+	if err := conf.loadUsersFile(ctx); err != nil {
+		return nil, err
+	}
 	if err := conf.validate(); err != nil {
 		return nil, err
 	}

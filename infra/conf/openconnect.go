@@ -13,6 +13,9 @@ type OpenConnectUserConfig struct {
 	Group              string   `json:"group,omitempty"`
 	L3                 *bool    `json:"l3,omitempty"`
 	MaxSessionsPerUser *uint32  `json:"maxSessionsPerUser,omitempty"`
+	// Soft block: the account stays, authentication rejects it, its live
+	// tunnels are cut.
+	Disabled *bool `json:"disabled,omitempty"`
 }
 
 type OpenConnectGroupConfig struct {
@@ -38,6 +41,10 @@ type OpenConnectConfig struct {
 	CamouflageSecret   string                   `json:"camouflageSecret,omitempty"`
 	CamouflageRealm    string                   `json:"camouflageRealm,omitempty"`
 	Groups             []OpenConnectGroupConfig `json:"groups,omitempty"`
+	// Path to the file holding this inbound's accounts. When set it is the
+	// source of users: seeded from "users" on first start, rewritten by the
+	// management API, so runtime changes survive a restart.
+	UsersFile string `json:"usersFile,omitempty"`
 }
 
 func (c *OpenConnectConfig) Build() (proto.Message, error) {
@@ -52,6 +59,7 @@ func (c *OpenConnectConfig) Build() (proto.Message, error) {
 			Group:              c.Users[i].Group,
 			L3:                 c.Users[i].L3,
 			MaxSessionsPerUser: c.Users[i].MaxSessionsPerUser,
+			Disabled:           c.Users[i].Disabled,
 		}
 	}
 	config.Subnet = c.Subnet
@@ -66,6 +74,7 @@ func (c *OpenConnectConfig) Build() (proto.Message, error) {
 	config.MaxSessionsPerUser = c.MaxSessionsPerUser
 	config.CamouflageSecret = c.CamouflageSecret
 	config.CamouflageRealm = c.CamouflageRealm
+	config.UsersFile = c.UsersFile
 	config.Groups = make([]*openconnect.Group, len(c.Groups))
 	for i := range c.Groups {
 		config.Groups[i] = &openconnect.Group{

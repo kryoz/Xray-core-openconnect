@@ -8,7 +8,9 @@ option java_multiple_files = true;
 
 message User {
   string name = 1;
-  // Salted SHA-256, format "salt_hex$hash_hex".
+  // Stored password, verified identically to ocserv/ocpasswd. Two formats:
+  // "salt_hex$hash_hex" (salted SHA-256, what `openconnect add` mints) and
+  // "$1$salt$digest" (MD5-crypt, what an existing ocpasswd file holds).
   string password = 2;
   // Optional static IP address assigned to this user.
   string ip = 3;
@@ -32,6 +34,11 @@ message User {
   // Live-tunnel bound for this account (0 = unlimited). Overrides the
   // group's max_sessions_per_user, which overrides the inbound-level one.
   optional uint32 max_sessions_per_user = 8;
+  // Soft block: authentication rejects the account but its credential and
+  // stats key stay in place, so the operator can suspend and restore a user
+  // without losing either. A live tunnel is cut and a cookie holder is no
+  // longer resumed.
+  optional bool disabled = 9;
 }
 // Group is a named set of split-routing networks shared by users.
 message Group {
@@ -92,4 +99,11 @@ message OpenConnectInboundConfig {
   // at authentication AND at CONNECT: a cookie holder resumes without
   // re-authenticating, so the auth-time check alone would let it through.
   uint32 max_sessions_per_user = 16;
+  // Path to the file that holds this inbound's accounts. When set, the file
+  // is the source of users: it is seeded from "users" on first start and
+  // rewritten on every change the management API makes, so add, block and
+  // remove survive a restart while the config file itself stays untouched.
+  // Empty keeps the old behavior — accounts come from "users" alone and
+  // runtime changes last until the next restart.
+  string users_file = 17;
 }

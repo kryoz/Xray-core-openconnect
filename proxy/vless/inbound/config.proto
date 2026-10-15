@@ -27,11 +27,18 @@ message Config {
   int64 seconds_to = 6;
   string padding = 7;
   // Bounds live flows of one account per inbound tag, per email (0 =
-// unlimited). A "session"
+  // unlimited). A "session"
   // here is a live TCP or UDP flow, so tune it in flows, not devices: a
   // browser alone opens several at once. Counted where the real connection
   // enters Process — an XTLS/vision flow and a whole MUX bundle each take one
   // slot. Excess flows get a closed connection, the only refusal a VLESS
   // client can see; live flows are never cut.
   uint32 max_sessions_per_user = 8;
+  // Path to the file that holds this inbound's accounts. When set, the file is
+  // the source of users: it is seeded from "users" on first start and rewritten
+  // on every change the management API makes, so add, block and remove survive
+  // a restart while the config file itself stays untouched. Empty keeps the old
+  // behavior — accounts come from "users" alone and runtime changes last until
+  // the next restart.
+  string users_file = 9;
 }

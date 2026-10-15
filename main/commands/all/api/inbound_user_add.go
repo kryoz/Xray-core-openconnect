@@ -13,6 +13,7 @@ import (
 	"github.com/xtls/xray-core/infra/conf"
 	"github.com/xtls/xray-core/infra/conf/serial"
 	"github.com/xtls/xray-core/proxy/masque"
+	"github.com/xtls/xray-core/proxy/openconnect"
 	"github.com/xtls/xray-core/proxy/shadowsocks"
 	"github.com/xtls/xray-core/proxy/shadowsocks_2022"
 	"github.com/xtls/xray-core/proxy/trojan"
@@ -91,6 +92,14 @@ func extractInboundUsers(inb *core.InboundHandlerConfig) []*protocol.User {
 		return ty.Users
 	case *masque.ServerConfig:
 		return ty.Users
+	case *openconnect.OpenConnectInboundConfig:
+		// The inbound's own user form is not the one the API exchanges: the
+		// name has to travel as the email, the key the operation addresses.
+		users := make([]*protocol.User, 0, len(ty.Users))
+		for _, u := range ty.Users {
+			users = append(users, openconnect.ProtocolUserOf(u))
+		}
+		return users
 	default:
 		fmt.Println("unsupported inbound type")
 	}
