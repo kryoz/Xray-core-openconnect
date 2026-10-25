@@ -386,6 +386,32 @@ func (e *ocLinkEndpoint) dispatchLoop(ctx context.Context, dispatcher stack.Netw
 	}
 }
 
+// sniffingRequestFrom returns the sniffing settings proxyman built from the
+// inbound "sniffing" block and put into the creating ctx (override protocols,
+// routeOnly, metadataOnly, domain/IP exclusions) — the same SniffingRequest
+// every other inbound hands the dispatcher.
+//
+// An inbound without sniffing keeps the behavior this fork had before the
+// block was honoured: sniff on, never override the destination. So deploying
+// this build changes routing for nobody who did not ask for it.
+//
+// ponytail: proto3 carries no presence for the block, so a block that sets
+// nothing but "enabled": false cannot be told apart from no block and keeps
+// sniffing on; any other setting makes the block authoritative. Upgrade when
+// SniffingConfig gains a presence marker.
+func sniffingRequestFrom(ctx context.Context) session.SniffingRequest {
+	content := session.ContentFromContext(ctx)
+	if content == nil {
+		return session.SniffingRequest{Enabled: true}
+	}
+	req := content.SniffingRequest
+	if !req.Enabled && !req.MetadataOnly && !req.RouteOnly &&
+		len(req.OverrideDestinationForProtocol) == 0 && req.ExcludeForDomain == nil && req.ExcludeForIP == nil {
+		return session.SniffingRequest{Enabled: true}
+	}
+	return req
+}
+
 // ocHandler owns the gVisor stack and dispatches the L4 flows it demuxes into
 // the Xray routing.Dispatcher.
 type ocHandler struct {
@@ -393,6 +419,9 @@ type ocHandler struct {
 	dispatcher routing.Dispatcher
 	tag        string
 	registry   *sessionRegistry
+	// sniffing is the inbound's sniffing settings, resolved once at startup
+	// from the inbound "sniffing" block (see sniffingRequestFrom).
+	sniffing session.SniffingRequest
 }
 
 // HandleConnection dispatches one gVisor-demuxed TCP/UDP flow.
@@ -424,7 +453,17 @@ func (h *ocHandler) HandleConnection(conn net.Conn, destination xnet.Destination
 		}
 	}
 	ctx = session.ContextWithInbound(ctx, &inbound)
-	ctx = session.ContextWithContent(ctx, &session.Content{SniffingRequest: session.SniffingRequest{Enabled: true}})
+	// RouteOnly leaves the dialed IP as the connection target, so that IP is
+	// already the address routing has to see. Without SkipDNSResolve the router
+	// would resolve the sniffed domain for its ip: rules whenever no rule
+	// matched on the first pass — uncached, through the system resolver.
+	// ponytail: with FakeDNS the dispatcher makes the domain the target
+	// instead and this also skips that resolve; upgrade if FakeDNS ever reaches
+	// the tunnel.
+	ctx = session.ContextWithContent(ctx, &session.Content{
+		SniffingRequest: h.sniffing,
+		SkipDNSResolve:  h.sniffing.RouteOnly,
+	})
 
 	ctx = log.ContextWithAccessMessage(ctx, &log.AccessMessage{
 		From:   source,
@@ -453,12 +492,12 @@ type ocStack struct {
 	flowTimeout time.Duration
 }
 
-func newOCStack(ctx context.Context, dispatcher routing.Dispatcher, tag string, mtu uint32, registry *sessionRegistry, flowTimeout time.Duration) *ocStack {
+func newOCStack(ctx context.Context, dispatcher routing.Dispatcher, tag string, mtu uint32, registry *sessionRegistry, flowTimeout time.Duration, sniffing session.SniffingRequest) *ocStack {
 	device := newOCDevice(mtu)
 	device.registry = registry // enables the L3 client↔client relay
 	return &ocStack{
 		ctx:         ctx,
-		handler:     &ocHandler{ctx: ctx, dispatcher: dispatcher, tag: tag, registry: registry},
+		handler:     &ocHandler{ctx: ctx, dispatcher: dispatcher, tag: tag, registry: registry, sniffing: sniffing},
 		device:      device,
 		endpoint:    &ocLinkEndpoint{device: device},
 		flowTimeout: flowTimeout,

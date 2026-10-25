@@ -97,7 +97,7 @@ func newTestServerUsers(t *testing.T, users []*User) *Server {
 
 	tctx, cancel := context.WithCancel(context.Background())
 	registry := newSessionRegistry(pool)
-	stack := newOCStack(tctx, nil, "openconnect", mtuOf(conf), registry, 0)
+	stack := newOCStack(tctx, nil, "openconnect", mtuOf(conf), registry, 0, sniffingRequestFrom(tctx))
 	s := &Server{
 		conf:        conf,
 		ctx:         tctx,

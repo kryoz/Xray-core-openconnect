@@ -127,7 +127,9 @@ func NewServer(ctx context.Context, conf *OpenConnectInboundConfig) (*Server, er
 	// drop the tunnel (2×dpd), also abort a dead peer's retransmission so a
 	// killed client cannot leak endpoints/timers that burn CPU afterwards.
 	flowTimeout := 2 * time.Duration(dpd) * time.Second
-	stack := newOCStack(sCtx, d, inbound.Tag, dataMTUOf(baseMTU), registry, flowTimeout)
+	// The inbound "sniffing" block reaches the proxy as the session content of
+	// the creating ctx, so read it before the stack ctx is detached from them.
+	stack := newOCStack(sCtx, d, inbound.Tag, dataMTUOf(baseMTU), registry, flowTimeout, sniffingRequestFrom(ctx))
 	stack.device.uplinkCounter = uplinkCounter
 	stack.device.downlinkCounter = downlinkCounter
 	// Per-user stats for the L3 relay: same counter names and policy gate as
