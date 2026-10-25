@@ -102,6 +102,36 @@ type BlockableUserManager interface {
 	SetUserBlocked(context.Context, string, bool) error
 }
 
+// TunableUserManager is a UserManager whose per-account live-tunnel settings
+// (the session bound and the L3 relay override) can be changed on a running
+// inbound. Unlike a block, a change does not touch the sessions up right now:
+// the settings are re-resolved from the store on every auth and CONNECT, and
+// the new values apply from the next check on.
+type TunableUserManager interface {
+	UserManager
+
+	// SetUserMaxSessions sets the live-tunnel bound of one account; 0 lifts
+	// the bound. A nil limit removes the override: the account's group bound
+	// applies again. The change is persisted with the account.
+	SetUserMaxSessions(context.Context, string, *uint32) error
+
+	// SetUserL3 sets the per-user L3 relay override; nil inherits the group's
+	// l3 flag, false forces off, true forces on. A running session keeps the
+	// flag it started with. The change is persisted with the account.
+	SetUserL3(context.Context, string, *bool) error
+}
+
+// DisconnectableUserManager is a UserManager whose live sessions can be cut
+// on a running inbound without touching the account: unlike a block, the user
+// keeps its credential and can authenticate again straight away.
+type DisconnectableUserManager interface {
+	UserManager
+
+	// DisconnectUser cuts every live session of one account. It is not an error if the user
+	// has no live session. The call is a no-op that returns nil.
+	DisconnectUser(context.Context, string) error
+}
+
 type GetInbound interface {
 	GetInbound() Inbound
 }

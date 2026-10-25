@@ -24,6 +24,25 @@ message BlockUserOperation {
   bool blocked = 2;
 }
 
+message SetUserMaxSessionsOperation {
+  string email = 1;
+  // Absent (inherit) leaves the group's bound in place; 0 lifts the bound
+  // (unlimited). While present, it overrides the account's group bound and
+  // the inbound default.
+  optional uint32 max_sessions_per_user = 2;
+}
+
+message SetUserL3Operation {
+  string email = 1;
+  // Presence picks the state: absent = inherit the group's l3 flag,
+  // false = force off, true = force on.
+  optional bool l3 = 2;
+}
+
+message DisconnectUserOperation {
+  string email = 1;
+}
+
 message AddInboundRequest {
   core.InboundHandlerConfig inbound = 1;
 }

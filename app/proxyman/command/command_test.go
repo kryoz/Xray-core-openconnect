@@ -15,6 +15,8 @@ import (
 	"github.com/xtls/xray-core/proxy/openconnect"
 	"github.com/xtls/xray-core/proxy/vless"
 	"github.com/xtls/xray-core/transport/internet/stat"
+
+	"google.golang.org/protobuf/proto"
 )
 
 // blockableInbound is a minimal inbound that implements
@@ -172,6 +174,338 @@ func TestBlockUserOperationTravelsAsATypedMessage(t *testing.T) {
 	}
 }
 
+// limitableInbound is a minimal inbound that implements
+// proxy.TunableUserManager and records what it was asked to do.
+type limitableInbound struct {
+	err       error
+	email     string
+	limit     *uint32
+	calls     int
+	l3        *bool
+	l3Calls   int
+	discCalls int
+}
+
+func (*limitableInbound) Network() []cnet.Network { return nil }
+
+func (*limitableInbound) Process(context.Context, cnet.Network, stat.Connection, routing.Dispatcher) error {
+	return nil
+}
+
+func (*limitableInbound) AddUser(context.Context, *protocol.MemoryUser) error { return nil }
+
+func (*limitableInbound) RemoveUser(context.Context, string) error { return nil }
+
+func (*limitableInbound) GetUser(context.Context, string) *protocol.MemoryUser { return nil }
+
+func (*limitableInbound) GetUsers(context.Context) []*protocol.MemoryUser { return nil }
+
+func (*limitableInbound) GetUsersCount(context.Context) int64 { return 0 }
+
+func (m *limitableInbound) SetUserMaxSessions(_ context.Context, email string, limit *uint32) error {
+	m.calls++
+	m.email = email
+	m.limit = limit
+	return m.err
+}
+
+func (m *limitableInbound) SetUserL3(_ context.Context, email string, l3 *bool) error {
+	m.l3Calls++
+	m.email = email
+	m.l3 = l3
+	return m.err
+}
+
+func (m *limitableInbound) DisconnectUser(_ context.Context, email string) error {
+	m.discCalls++
+	m.email = email
+	return m.err
+}
+
+func TestSetUserMaxSessionsOperationApplyInbound(t *testing.T) {
+	tests := []struct {
+		name    string
+		inbound proxy.Inbound
+		op      *SetUserMaxSessionsOperation
+		wantErr bool
+		wantLim *uint32
+		wantN   int
+	}{
+		{
+			name:    "set a bound",
+			inbound: &limitableInbound{},
+			op:      &SetUserMaxSessionsOperation{Email: "alice", MaxSessionsPerUser: proto.Uint32(2)},
+			wantLim: proto.Uint32(2),
+			wantN:   1,
+		},
+		{
+			name:    "zero lifts the bound",
+			inbound: &limitableInbound{},
+			op:      &SetUserMaxSessionsOperation{Email: "alice", MaxSessionsPerUser: proto.Uint32(0)},
+			wantLim: proto.Uint32(0),
+			wantN:   1,
+		},
+		{
+			name:    "absent inherits the group's bound",
+			inbound: &limitableInbound{},
+			op:      &SetUserMaxSessionsOperation{Email: "alice"},
+			wantN:   1,
+		},
+		{
+			name:    "the inbound refuses",
+			inbound: &limitableInbound{err: errors.New("no such user")},
+			op:      &SetUserMaxSessionsOperation{Email: "ghost", MaxSessionsPerUser: proto.Uint32(2)},
+			wantErr: true,
+			wantLim: proto.Uint32(2),
+			wantN:   1,
+		},
+		{
+			name:    "a user manager that cannot limit",
+			inbound: &plainInbound{Inbound: &limitableInbound{}, UserManager: &limitableInbound{}},
+			op:      &SetUserMaxSessionsOperation{Email: "alice", MaxSessionsPerUser: proto.Uint32(2)},
+			wantErr: true,
+		},
+		{
+			name:    "not a user manager at all",
+			inbound: &blockableOnlyInbound{},
+			op:      &SetUserMaxSessionsOperation{Email: "alice", MaxSessionsPerUser: proto.Uint32(2)},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.op.ApplyInbound(context.Background(), &handler{p: tc.inbound})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ApplyInbound error = %v, wantErr %v", err, tc.wantErr)
+			}
+			li, ok := tc.inbound.(*limitableInbound)
+			if !ok {
+				return
+			}
+			if li.calls != tc.wantN || li.email != tc.op.Email || !limSame(li.limit, tc.wantLim) {
+				t.Fatalf("SetUserMaxSessions called %d time(s) with (%q, %v), want (%q, %v) %d time(s)",
+					li.calls, li.email, li.limit, tc.op.Email, tc.wantLim, tc.wantN)
+			}
+		})
+	}
+}
+
+// TestSetUserMaxSessionsOperationTravelsAsATypedMessage pins the AlterInbound
+// path: the operation reaches the server through common.serial, so its type
+// has to be in the global proto registry and it has to satisfy InboundOperation.
+func TestSetUserMaxSessionsOperationTravelsAsATypedMessage(t *testing.T) {
+	op := &SetUserMaxSessionsOperation{Email: "alice", MaxSessionsPerUser: proto.Uint32(2)}
+	raw, err := serial.ToTypedMessage(op).GetInstance()
+	if err != nil {
+		t.Fatalf("GetInstance: %v", err)
+	}
+	got, ok := raw.(InboundOperation)
+	if !ok {
+		t.Fatalf("the operation is not an InboundOperation: %T", raw)
+	}
+	gotOp, ok := got.(*SetUserMaxSessionsOperation)
+	if !ok || !limSame(gotOp.MaxSessionsPerUser, proto.Uint32(2)) {
+		t.Fatalf("round trip returned %#v", gotOp)
+	}
+
+	// The absent bound must survive the round trip as absent: 0 is a real
+	// value (unlimited) and inherit is the missing field, not a zero one.
+	raw, err = serial.ToTypedMessage(&SetUserMaxSessionsOperation{Email: "alice"}).GetInstance()
+	if err != nil {
+		t.Fatalf("GetInstance: %v", err)
+	}
+	gotOp, ok = raw.(*SetUserMaxSessionsOperation)
+	if !ok || gotOp.MaxSessionsPerUser != nil {
+		t.Fatalf("round trip returned %#v", gotOp)
+	}
+}
+
+// limSame compares two optional bounds: absent, 0 and N are distinct.
+func limSame(a, b *uint32) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	return a == nil || *a == *b
+}
+
+// l3Same compares two tri-state L3 values: nil, false and true are distinct.
+func l3Same(a, b *bool) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	return a == nil || *a == *b
+}
+
+func TestSetUserL3OperationApplyInbound(t *testing.T) {
+	tests := []struct {
+		name    string
+		inbound proxy.Inbound
+		op      *SetUserL3Operation
+		wantErr bool
+		wantL3  *bool
+		wantN   int
+	}{
+		{
+			name:    "force on",
+			inbound: &limitableInbound{},
+			op:      &SetUserL3Operation{Email: "alice", L3: proto.Bool(true)},
+			wantL3:  proto.Bool(true),
+			wantN:   1,
+		},
+		{
+			name:    "force off",
+			inbound: &limitableInbound{},
+			op:      &SetUserL3Operation{Email: "alice", L3: proto.Bool(false)},
+			wantL3:  proto.Bool(false),
+			wantN:   1,
+		},
+		{
+			name:    "inherit clears the override",
+			inbound: &limitableInbound{},
+			op:      &SetUserL3Operation{Email: "alice"},
+			wantN:   1,
+		},
+		{
+			name:    "the inbound refuses",
+			inbound: &limitableInbound{err: errors.New("no such user")},
+			op:      &SetUserL3Operation{Email: "ghost", L3: proto.Bool(true)},
+			wantErr: true,
+			wantL3:  proto.Bool(true),
+			wantN:   1,
+		},
+		{
+			name:    "a user manager that cannot tune",
+			inbound: &plainInbound{Inbound: &limitableInbound{}, UserManager: &limitableInbound{}},
+			op:      &SetUserL3Operation{Email: "alice", L3: proto.Bool(true)},
+			wantErr: true,
+		},
+		{
+			name:    "not a user manager at all",
+			inbound: &blockableOnlyInbound{},
+			op:      &SetUserL3Operation{Email: "alice", L3: proto.Bool(true)},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.op.ApplyInbound(context.Background(), &handler{p: tc.inbound})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ApplyInbound error = %v, wantErr %v", err, tc.wantErr)
+			}
+			li, ok := tc.inbound.(*limitableInbound)
+			if !ok {
+				return
+			}
+			if li.l3Calls != tc.wantN || li.email != tc.op.Email || !l3Same(li.l3, tc.wantL3) {
+				t.Fatalf("SetUserL3 called %d time(s) with (%q, %v), want (%q, %v) %d time(s)",
+					li.l3Calls, li.email, li.l3, tc.op.Email, tc.wantL3, tc.wantN)
+			}
+		})
+	}
+}
+
+// TestSetUserL3OperationTravelsAsATypedMessage pins the tri-state through the
+// wire: an optional bool of false has to stay distinct from an absent one, or
+// "inherit" would silently become "force off" on the server.
+func TestSetUserL3OperationTravelsAsATypedMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		op   *SetUserL3Operation
+		want *bool
+	}{
+		{name: "inherit", op: &SetUserL3Operation{Email: "alice"}, want: nil},
+		{name: "force on", op: &SetUserL3Operation{Email: "alice", L3: proto.Bool(true)}, want: proto.Bool(true)},
+		{name: "force off", op: &SetUserL3Operation{Email: "alice", L3: proto.Bool(false)}, want: proto.Bool(false)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := serial.ToTypedMessage(tt.op).GetInstance()
+			if err != nil {
+				t.Fatalf("GetInstance: %v", err)
+			}
+			got, ok := raw.(InboundOperation)
+			if !ok {
+				t.Fatalf("the operation is not an InboundOperation: %T", raw)
+			}
+			gotOp, ok := got.(*SetUserL3Operation)
+			if !ok || gotOp.Email != "alice" || !l3Same(gotOp.L3, tt.want) {
+				t.Fatalf("round trip returned %#v", gotOp)
+			}
+		})
+	}
+}
+
+func TestDisconnectUserOperationApplyInbound(t *testing.T) {
+	tests := []struct {
+		name    string
+		inbound proxy.Inbound
+		op      *DisconnectUserOperation
+		wantErr bool
+		wantN   int
+	}{
+		{
+			name:    "cut the sessions",
+			inbound: &limitableInbound{},
+			op:      &DisconnectUserOperation{Email: "alice"},
+			wantN:   1,
+		},
+		{
+			name:    "the inbound refuses",
+			inbound: &limitableInbound{err: errors.New("no such user")},
+			op:      &DisconnectUserOperation{Email: "ghost"},
+			wantErr: true,
+			wantN:   1,
+		},
+		{
+			name:    "a user manager that cannot disconnect",
+			inbound: &plainInbound{Inbound: &limitableInbound{}, UserManager: &limitableInbound{}},
+			op:      &DisconnectUserOperation{Email: "alice"},
+			wantErr: true,
+		},
+		{
+			name:    "not a user manager at all",
+			inbound: &blockableOnlyInbound{},
+			op:      &DisconnectUserOperation{Email: "alice"},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.op.ApplyInbound(context.Background(), &handler{p: tc.inbound})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ApplyInbound error = %v, wantErr %v", err, tc.wantErr)
+			}
+			li, ok := tc.inbound.(*limitableInbound)
+			if !ok {
+				return
+			}
+			if li.discCalls != tc.wantN || li.email != tc.op.Email {
+				t.Fatalf("DisconnectUser called %d time(s) with %q, want %q %d time(s)",
+					li.discCalls, li.email, tc.op.Email, tc.wantN)
+			}
+		})
+	}
+}
+
+func TestDisconnectUserOperationTravelsAsATypedMessage(t *testing.T) {
+	op := &DisconnectUserOperation{Email: "alice"}
+	raw, err := serial.ToTypedMessage(op).GetInstance()
+	if err != nil {
+		t.Fatalf("GetInstance: %v", err)
+	}
+	got, ok := raw.(InboundOperation)
+	if !ok {
+		t.Fatalf("the operation is not an InboundOperation: %T", raw)
+	}
+	gotOp, ok := got.(*DisconnectUserOperation)
+	if !ok || gotOp.Email != "alice" {
+		t.Fatalf("round trip returned %#v", gotOp)
+	}
+}
+
 // TestAddUserOperationApplyInbound covers the block flag an add carries: a
 // protocol that cannot enforce a block has to refuse the account instead of
 // storing one that only looks blocked.
@@ -242,8 +576,8 @@ func TestAddUserOperationApplyInbound(t *testing.T) {
 // from: an account keeps everything an operator lists users for and loses the
 // secret, because on an unauthenticated commander socket an OpenConnect
 // password is a salted hash to attack offline. What takes its place is a
-// fingerprint, which is what lets the provisioner notice a changed password
-// without the credential ever leaving the node.
+// fingerprint, which is what lets a caller notice a changed password without
+// the credential ever leaving the node.
 func TestRedactUserMasksCredentials(t *testing.T) {
 	const secret = "00112233$0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -287,9 +621,9 @@ func TestRedactUserMasksCredentials(t *testing.T) {
 					t.Fatalf("the account is no longer an OpenConnect one: %T", raw)
 				}
 				// Pinned rather than recomputed from the function the code calls:
-				// this is the value a node and a provisioner built at different
-				// times have to agree on, and a vector written out is the only
-				// thing that notices it ever changed.
+				// this is the value two builds at different versions have to
+				// agree on, and a vector written out is the only thing that
+				// notices it ever changed.
 				const fingerprint = "5a6a672864d7e46d5f05aca2cbce3a53a990fb1c7c2c3ec988c8b70461d2d799"
 				if u.Password != fingerprint {
 					t.Fatalf("the credential left the boundary as %q, want its fingerprint %s", u.Password, fingerprint)

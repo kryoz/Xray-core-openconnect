@@ -144,6 +144,21 @@ func (s *userStore) setBlocked(name string, blocked bool) (*User, error) {
 	return next, nil
 }
 
+// replace swaps the stored record of an existing user and returns the
+// predecessor, so the caller can put it back. It does not re-validate the
+// user: the only callers swap fields that need no validation (the session
+// bound) after looking the name up themselves.
+func (s *userStore) replace(name string, u *User) (*User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	au, ok := s.users[name]
+	if !ok {
+		return nil, errors.New("user ", name, " not found")
+	}
+	s.users[name] = &authUser{cred: au.cred, user: u}
+	return au.user, nil
+}
+
 // lookup resolves a user for the checks that need existence and the disabled
 // flag together: the CONNECT resume re-check and the API.
 func (s *userStore) lookup(name string) (*authUser, bool) {

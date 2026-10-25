@@ -15,17 +15,17 @@ import (
 // credential rather than of an empty message.
 //
 // Read the other way round, this is the test that fails if ToProto ever starts
-// masking on its own. The provisioner would then be comparing a fingerprint of
-// nothing against a real one, would conclude every account on the node had
-// changed its password at once, and would be stopped only by its guard.
+// masking on its own. A caller that reconciles accounts would then compare a
+// fingerprint of nothing against a real one, and would conclude every account
+// on the node had changed its password at once.
 func TestRedactionDigestsWhatTheInboundStores(t *testing.T) {
 	cases := []struct {
 		name       string
 		credential string
 	}{
 		{
-			// Both formats the inbound verifies: MD5-crypt, which the licence
-			// server mints, and the SHA-256 form xray's own tooling mints.
+			// Both formats the inbound verifies: the MD5-crypt form an account
+			// source mints, and the SHA-256 form xray's own tooling mints.
 			name:       "md5-crypt",
 			credential: "$1$k7Pq2mXr$Yq8h1H0rJx5Hk1oRlMR1M0",
 		},

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -75,6 +76,49 @@ Reverses a block: the account authenticates again with the credential it kept.
 `,
 }
 
+var cmdLimit = &base.Command{
+	UsageLine: "{{.Exec}} openconnect limit [-c config.json | -s 127.0.0.1:8080 -in tag] [<name> <maxSessions|inherit>]",
+	Short:     "Change the per-account live-session limit of an OpenConnect user",
+	Long: `
+{{.Exec}} {{.LongName}} [-c config.json] [-in tag] <name> <maxSessions>
+{{.Exec}} {{.LongName}} -s 127.0.0.1:8080 -in tag <name> <maxSessions>
+Sets the live-tunnel bound of one account; 0 lifts the bound. While set, it
+overrides the account's group bound and the inbound default. inherit removes
+the override: the group's bound applies again.
+With -s the change lands on a running process at once: the new bound is
+checked from the next auth or CONNECT on, the sessions up right now keep
+running, and the change is persisted with the account. Without -s the config
+file is edited and the change takes effect on the next start.
+`,
+}
+
+var cmdL3 = &base.Command{
+	UsageLine: "{{.Exec}} openconnect l3 [-c config.json | -s 127.0.0.1:8080 -in tag] [<name> <on|off|inherit>]",
+	Short:     "Set the per-user L3 client-to-client relay override of an OpenConnect user",
+	Long: `
+{{.Exec}} {{.LongName}} [-c config.json] [-in tag] <name> <on|off|inherit>
+{{.Exec}} {{.LongName}} -s 127.0.0.1:8080 -in tag <name> <on|off|inherit>
+Sets the per-user L3 relay override; while set it wins over the group's l3
+flag. on forces the relay on, off forces it off, inherit drops the override
+and the group flag applies again.
+With -s the change lands on a running process at once, from the next session
+on; the change is persisted with the account. Without -s the config file is
+edited and the change takes effect on the next start.
+`,
+}
+
+var cmdDisconnect = &base.Command{
+	UsageLine: "{{.Exec}} openconnect disconnect [-s 127.0.0.1:8080 -in tag] [<name>]",
+	Short:     "Cut the live sessions of an OpenConnect user without blocking the account",
+	Long: `
+{{.Exec}} {{.LongName}} -s 127.0.0.1:8080 -in tag <name>
+Cuts every live tunnel of the account. The account itself is untouched —
+credential, static address, overrides, block flag — so the user can
+authenticate again straight away. Unlike block, nothing is persisted and the
+change exists only in the running process.
+`,
+}
+
 func init() {
 	cmdAdd.Run = executeAdd // break init loop
 	cmdList.Run = executeList
@@ -82,6 +126,9 @@ func init() {
 	cmdRm.Run = executeRm
 	cmdBlock.Run = executeBlock
 	cmdUnblock.Run = executeUnblock
+	cmdLimit.Run = executeLimit
+	cmdL3.Run = executeL3
+	cmdDisconnect.Run = executeDisconnect
 }
 
 // serverUsage is the -s flag every user command carries: set, it talks to a
@@ -114,6 +161,17 @@ var (
 	unblockConfig  = cmdUnblock.Flag.String("c", "", "path to the xray JSON config file")
 	unblockInbound = cmdUnblock.Flag.String("in", "", "inbound tag (needed when several OpenConnect inbounds exist)")
 	unblockServer  = cmdUnblock.Flag.String("s", "", serverUsage)
+
+	limitConfig  = cmdLimit.Flag.String("c", "", "path to the xray JSON config file")
+	limitInbound = cmdLimit.Flag.String("in", "", "inbound tag (needed when several OpenConnect inbounds exist)")
+	limitServer  = cmdLimit.Flag.String("s", "", serverUsage)
+
+	l3Config  = cmdL3.Flag.String("c", "", "path to the xray JSON config file")
+	l3Inbound = cmdL3.Flag.String("in", "", "inbound tag (needed when several OpenConnect inbounds exist)")
+	l3Server  = cmdL3.Flag.String("s", "", serverUsage)
+
+	disconnectInbound = cmdDisconnect.Flag.String("in", "", "inbound tag (needed when several OpenConnect inbounds exist)")
+	disconnectServer  = cmdDisconnect.Flag.String("s", "", serverUsage)
 )
 
 func executeAdd(cmd *base.Command, args []string) {
@@ -314,6 +372,143 @@ func runBlock(cmd *base.Command, args []string, blocked bool, config, inbound, s
 		return
 	}
 	base.Fatalf("user %q not found", name)
+}
+
+func executeLimit(cmd *base.Command, args []string) {
+	if len(args) != 2 {
+		cmd.Usage()
+	}
+	name, limitArg := args[0], args[1]
+	if name == "" {
+		base.Fatalf("user name must not be empty")
+	}
+	limit, err := parseLimit(limitArg)
+	if err != nil {
+		base.Fatalf("maxSessions must be an unsigned integer (0 lifts the bound) or inherit: %v", err)
+	}
+
+	if *limitServer != "" {
+		onlineLimit(*limitServer, *limitInbound, name, limit)
+		return
+	}
+
+	doc, err := loadConfig(*limitConfig)
+	must(err)
+	ib, err := findInbound(doc, *limitInbound)
+	must(err)
+	if file := usersFileOf(ib); file != "" {
+		base.Fatalf("%s keeps its accounts in %q; that file, not the config, is what the inbound loads. Use -s, or edit the file and restart", inboundLabel(ib), file)
+	}
+	users, err := usersOf(ib)
+	must(err)
+	for _, u := range users {
+		if userName(u) != name {
+			continue
+		}
+		m, _ := u.(map[string]any)
+		if limit == nil {
+			delete(m, "maxSessionsPerUser")
+			must(saveConfig(*limitConfig, doc))
+			fmt.Printf("removed the max-sessions override of %q in %s; the group's limit applies again; takes effect on the next start\n", name, inboundLabel(ib))
+		} else {
+			m["maxSessionsPerUser"] = *limit
+			must(saveConfig(*limitConfig, doc))
+			fmt.Printf("set max sessions per user of %q in %s to %d; takes effect on the next start\n", name, inboundLabel(ib), *limit)
+		}
+		return
+	}
+	base.Fatalf("user %q not found", name)
+}
+
+// parseLimit maps the CLI word to the bound: a number forces the account's
+// own bound (0 lifts it, unlimited), inherit leaves it to the group's bound.
+func parseLimit(arg string) (*uint32, error) {
+	switch strings.ToLower(arg) {
+	case "inherit", "unset", "group":
+		return nil, nil
+	}
+	v, err := strconv.ParseUint(arg, 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	limit := uint32(v)
+	return &limit, nil
+}
+
+// parseL3 maps the CLI word to the tri-state flag: on and off force the
+// relay, inherit leaves it to the group's l3 flag.
+func parseL3(arg string) (*bool, error) {
+	switch strings.ToLower(arg) {
+	case "on", "true", "1":
+		v := true
+		return &v, nil
+	case "off", "false", "0":
+		v := false
+		return &v, nil
+	case "inherit", "unset", "group":
+		return nil, nil
+	}
+	return nil, errors.New("expected on, off or inherit")
+}
+
+func executeL3(cmd *base.Command, args []string) {
+	if len(args) != 2 {
+		cmd.Usage()
+	}
+	name, arg := args[0], args[1]
+	if name == "" {
+		base.Fatalf("user name must not be empty")
+	}
+	l3, err := parseL3(arg)
+	if err != nil {
+		base.Fatalf("l3 must be on, off or inherit: %v", err)
+	}
+
+	if *l3Server != "" {
+		onlineL3(*l3Server, *l3Inbound, name, l3)
+		return
+	}
+
+	doc, err := loadConfig(*l3Config)
+	must(err)
+	ib, err := findInbound(doc, *l3Inbound)
+	must(err)
+	if file := usersFileOf(ib); file != "" {
+		base.Fatalf("%s keeps its accounts in %q; that file, not the config, is what the inbound loads. Use -s, or edit the file and restart", inboundLabel(ib), file)
+	}
+	users, err := usersOf(ib)
+	must(err)
+	for _, u := range users {
+		if userName(u) != name {
+			continue
+		}
+		m, _ := u.(map[string]any)
+		if l3 == nil {
+			delete(m, "l3")
+		} else {
+			m["l3"] = *l3
+		}
+		must(saveConfig(*l3Config, doc))
+		fmt.Printf("set l3 of %q in %s to %s; takes effect on the next start\n", name, inboundLabel(ib), oc.L3Label(l3))
+		return
+	}
+	base.Fatalf("user %q not found", name)
+}
+
+func executeDisconnect(cmd *base.Command, args []string) {
+	if len(args) != 1 {
+		cmd.Usage()
+	}
+	name := args[0]
+	if name == "" {
+		base.Fatalf("user name must not be empty")
+	}
+	// Live sessions only exist in a running process; there is no config file
+	// to edit for this one.
+	if *disconnectServer == "" {
+		base.Fatalf("-s is required: disconnecting only makes sense against a running process")
+	}
+	onlineDisconnect(*disconnectServer, *disconnectInbound, name)
 }
 
 // usersFileOf returns the overlay file an inbound keeps its accounts in, if it

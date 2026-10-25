@@ -92,6 +92,48 @@ func onlineBlock(addr, tag, name string, blocked bool) {
 	})
 }
 
+func onlineLimit(addr, tag, name string, limit *uint32) {
+	conn, ctx, close := dialAPI(addr)
+	defer close()
+	tag = requireTag(tag, "limit")
+	_, err := handlerService.NewHandlerServiceClient(conn).AlterInbound(ctx, &handlerService.AlterInboundRequest{
+		Tag: tag,
+		Operation: cserial.ToTypedMessage(&handlerService.SetUserMaxSessionsOperation{
+			Email:              name,
+			MaxSessionsPerUser: limit,
+		}),
+	})
+	must(err)
+	if limit == nil {
+		fmt.Printf("removed the max-sessions override of %q in the running inbound %s; the group's limit applies again\n", name, tag)
+	} else {
+		fmt.Printf("set max sessions per user of %q in the running inbound %s to %d\n", name, tag, *limit)
+	}
+}
+
+func onlineL3(addr, tag, name string, l3 *bool) {
+	conn, ctx, close := dialAPI(addr)
+	defer close()
+	tag = requireTag(tag, "l3")
+	_, err := handlerService.NewHandlerServiceClient(conn).AlterInbound(ctx, &handlerService.AlterInboundRequest{
+		Tag: tag,
+		Operation: cserial.ToTypedMessage(&handlerService.SetUserL3Operation{
+			Email: name,
+			L3:    l3,
+		}),
+	})
+	must(err)
+	fmt.Printf("set l3 relay of %q in the running inbound %s to %s\n", name, tag, oc.L3Label(l3))
+}
+
+func onlineDisconnect(addr, tag, name string) {
+	conn, ctx, close := dialAPI(addr)
+	defer close()
+	alter(ctx, conn, requireTag(tag, "disconnect"), "disconnected", name, &handlerService.DisconnectUserOperation{
+		Email: name,
+	})
+}
+
 func onlineList(addr, tag string) {
 	conn, ctx, close := dialAPI(addr)
 	defer close()

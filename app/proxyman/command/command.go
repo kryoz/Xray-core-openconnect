@@ -87,6 +87,45 @@ func (op *BlockUserOperation) ApplyInbound(ctx context.Context, handler inbound.
 	return um.SetUserBlocked(ctx, op.Email, op.Blocked)
 }
 
+// ApplyInbound implements InboundOperation.
+func (op *SetUserMaxSessionsOperation) ApplyInbound(ctx context.Context, handler inbound.Handler) error {
+	p, err := getInbound(handler)
+	if err != nil {
+		return err
+	}
+	um, ok := p.(proxy.TunableUserManager)
+	if !ok {
+		return errors.New("proxy does not support per-user session limits")
+	}
+	return um.SetUserMaxSessions(ctx, op.Email, op.MaxSessionsPerUser)
+}
+
+// ApplyInbound implements InboundOperation.
+func (op *SetUserL3Operation) ApplyInbound(ctx context.Context, handler inbound.Handler) error {
+	p, err := getInbound(handler)
+	if err != nil {
+		return err
+	}
+	um, ok := p.(proxy.TunableUserManager)
+	if !ok {
+		return errors.New("proxy does not support per-user L3 overrides")
+	}
+	return um.SetUserL3(ctx, op.Email, op.L3)
+}
+
+// ApplyInbound implements InboundOperation.
+func (op *DisconnectUserOperation) ApplyInbound(ctx context.Context, handler inbound.Handler) error {
+	p, err := getInbound(handler)
+	if err != nil {
+		return err
+	}
+	um, ok := p.(proxy.DisconnectableUserManager)
+	if !ok {
+		return errors.New("proxy does not support disconnecting users")
+	}
+	return um.DisconnectUser(ctx, op.Email)
+}
+
 type handlerServer struct {
 	s   *core.Instance
 	ihm inbound.Manager

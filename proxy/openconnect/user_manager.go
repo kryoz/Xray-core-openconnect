@@ -11,8 +11,10 @@ import (
 )
 
 var (
-	_ proxy.UserManager          = (*Server)(nil)
-	_ proxy.BlockableUserManager = (*Server)(nil)
+	_ proxy.UserManager               = (*Server)(nil)
+	_ proxy.BlockableUserManager      = (*Server)(nil)
+	_ proxy.TunableUserManager        = (*Server)(nil)
+	_ proxy.DisconnectableUserManager = (*Server)(nil)
 )
 
 // AddUser implements proxy.UserManager: the account becomes usable on the
@@ -145,6 +147,110 @@ func (s *Server) SetUserBlocked(ctx context.Context, email string, blocked bool)
 	n := s.registry.disconnectUser(ctx, u.Name, "user blocked")
 	errors.LogInfo(ctx, "openconnect: user ", u.Name, " blocked, ", n, " session(s) disconnected")
 	return nil
+}
+
+// SetUserMaxSessions implements proxy.TunableUserManager. The bound is
+// re-resolved from the store on every auth and CONNECT, so the swapped record
+// bites from the next limit check on while the sessions up right now keep
+// running — nothing is kicked, unlike a block.
+// A nil limit removes the override: the account's group bound applies again.
+func (s *Server) SetUserMaxSessions(ctx context.Context, email string, limit *uint32) error {
+	if au, ok := s.users.lookup(email); !ok {
+		return errors.New("user ", email, " not found")
+	} else if cur := au.user.MaxSessionsPerUser; cur == limit || (cur != nil && limit != nil && *cur == *limit) {
+		return nil // idempotent: nothing to swap, no file rewrite
+	}
+
+	var old *User
+	err := s.mutateUsers(func() error {
+		au, ok := s.users.lookup(email)
+		if !ok {
+			return errors.New("user ", email, " not found")
+		}
+		next := proto.Clone(au.user).(*User)
+		next.MaxSessionsPerUser = limit
+		prev, err := s.users.replace(email, next)
+		old = prev
+		return err
+	}, func() error {
+		_, err := s.users.replace(email, old)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if limit == nil {
+		errors.LogInfo(ctx, "openconnect: max sessions per user of ", email, " reset to the group's limit")
+		return nil
+	}
+	errors.LogInfo(ctx, "openconnect: max sessions per user of ", email, " set to ", *limit)
+	return nil
+}
+
+// SetUserL3 implements proxy.TunableUserManager. The flag is resolved when a
+// session is created, so the swapped record bites from the next session on
+// while the sessions up right now keep the flag they started with — nothing
+// is kicked, unlike a block.
+func (s *Server) SetUserL3(ctx context.Context, email string, l3 *bool) error {
+	if au, ok := s.users.lookup(email); !ok {
+		return errors.New("user ", email, " not found")
+	} else if l3Equal(au.user.L3, l3) {
+		return nil // idempotent: nothing to swap, no file rewrite
+	}
+
+	var old *User
+	err := s.mutateUsers(func() error {
+		au, ok := s.users.lookup(email)
+		if !ok {
+			return errors.New("user ", email, " not found")
+		}
+		next := proto.Clone(au.user).(*User)
+		next.L3 = l3
+		prev, err := s.users.replace(email, next)
+		old = prev
+		return err
+	}, func() error {
+		_, err := s.users.replace(email, old)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	errors.LogInfo(ctx, "openconnect: l3 relay of ", email, " set to ", L3Label(l3))
+	return nil
+}
+
+// DisconnectUser cuts every live session of one account. The account itself
+// is untouched — credential, static address, overrides, block flag — so the
+// user can authenticate again straight away. It is a no-op when the account
+// has no live session.
+func (s *Server) DisconnectUser(ctx context.Context, email string) error {
+	if _, ok := s.users.lookup(email); !ok {
+		return errors.New("user ", email, " not found")
+	}
+	n := s.registry.disconnectUser(ctx, email, "disconnected by operator")
+	errors.LogInfo(ctx, "openconnect: user ", email, " disconnected, ", n, " session(s)")
+	return nil
+}
+
+// l3Equal compares the tri-state L3 flags: nil, false and true are distinct.
+func l3Equal(a, b *bool) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	return a == nil || *a == *b
+}
+
+// L3Label renders a tri-state L3 flag for logs and CLI output.
+func L3Label(l3 *bool) string {
+	switch {
+	case l3 == nil:
+		return "inherit"
+	case *l3:
+		return "on"
+	default:
+		return "off"
+	}
 }
 
 // GetUser implements proxy.UserManager. A blocked user is still returned: the

@@ -633,6 +633,7 @@ func TestConcurrentMutationUnderReads(t *testing.T) {
 		writers.Add(1)
 		go func() {
 			defer writers.Done()
+			l3 := true
 			for n := 0; n < 200; n++ {
 				// Every step may legitimately fail on the other writer's
 				// interleaving; what matters is that the store stays
@@ -640,6 +641,10 @@ func TestConcurrentMutationUnderReads(t *testing.T) {
 				_ = s.AddUser(ctx, mu)
 				_ = s.SetUserBlocked(ctx, "bob", true)
 				_ = s.SetUserBlocked(ctx, "bob", false)
+				_ = s.SetUserMaxSessions(ctx, "bob", proto.Uint32(1))
+				_ = s.SetUserL3(ctx, "bob", &l3)
+				l3 = !l3
+				_ = s.DisconnectUser(ctx, "bob")
 				_ = s.RemoveUser(ctx, "bob")
 			}
 		}()

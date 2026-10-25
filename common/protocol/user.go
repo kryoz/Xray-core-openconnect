@@ -55,14 +55,14 @@ func ToProtoUser(mu *MemoryUser) *User {
 // lowercase hex sha256 over its bytes.
 //
 // It answers one question — does the account an inbound holds still carry the
-// credential the licence server exports? — and a digest answers it as well as
-// the credential does, while being the only form of it that may leave an
+// credential it was created with? — and a digest answers it as well as the
+// credential does, while being the only form of it that may leave an
 // unauthenticated commander socket. It is taken of the stored form, which is
 // salted and is not the password, so recovering that form means guessing the
 // salt and the password together: the attack the stored hash already resists.
 //
 // Both ends of the comparison call this one function — app/proxyman/command on
-// the node, cmd/provisioner on the loop that reconciles it — so they cannot
+// the node and the reconciliation loop that drives it — so they cannot
 // disagree about it. They are built and deployed separately, and disagreeing
 // would read as every account on the node having changed its password at once.
 func CredentialFingerprint(credential string) string {

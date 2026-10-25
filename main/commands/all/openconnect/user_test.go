@@ -186,3 +186,75 @@ func TestGenerateCredentialViaHashCommand(t *testing.T) {
 		t.Fatalf("readPassword passthrough = %q, %v", got, err)
 	}
 }
+
+func TestLimitCommand(t *testing.T) {
+	path := writeConfig(t, testConfig)
+	*limitConfig, *limitInbound = path, ""
+
+	executeLimit(cmdLimit, []string{"alice", "2"})
+	users := usersFrom(t, path, "")
+	for _, u := range users {
+		if userName(u) == "alice" {
+			m, _ := u.(map[string]any)
+			if m["maxSessionsPerUser"] != float64(2) {
+				t.Fatalf("maxSessionsPerUser = %v, want 2", m["maxSessionsPerUser"])
+			}
+		}
+	}
+
+	// Zero lifts the bound and is stored as 0, which the inbound reads as
+	// "unlimited" — distinct from the field being absent.
+	executeLimit(cmdLimit, []string{"alice", "0"})
+	users = usersFrom(t, path, "")
+	for _, u := range users {
+		if userName(u) == "alice" {
+			m, _ := u.(map[string]any)
+			if m["maxSessionsPerUser"] != float64(0) {
+				t.Fatalf("maxSessionsPerUser = %v, want 0", m["maxSessionsPerUser"])
+			}
+		}
+	}
+
+	// inherit removes the override: the stored field is gone, so the
+	// account's group bound applies again.
+	executeLimit(cmdLimit, []string{"alice", "inherit"})
+	users = usersFrom(t, path, "")
+	for _, u := range users {
+		if userName(u) == "alice" {
+			m, _ := u.(map[string]any)
+			if _, present := m["maxSessionsPerUser"]; present {
+				t.Fatalf("maxSessionsPerUser = %v, want absent", m["maxSessionsPerUser"])
+			}
+		}
+	}
+}
+
+func TestL3Command(t *testing.T) {
+	path := writeConfig(t, testConfig)
+	*l3Config, *l3Inbound = path, ""
+
+	check := func(want any) {
+		users := usersFrom(t, path, "")
+		for _, u := range users {
+			if userName(u) == "alice" {
+				m, _ := u.(map[string]any)
+				if m["l3"] != want {
+					t.Fatalf("l3 = %v, want %v", m["l3"], want)
+				}
+				return
+			}
+		}
+		t.Fatal("alice disappeared")
+	}
+
+	executeL3(cmdL3, []string{"alice", "on"})
+	check(true)
+
+	executeL3(cmdL3, []string{"alice", "off"})
+	check(false)
+
+	// Inherit drops the field outright: an absent flag is what the inbound
+	// reads as "fall back to the group", distinct from a stored false.
+	executeL3(cmdL3, []string{"alice", "inherit"})
+	check(nil)
+}
