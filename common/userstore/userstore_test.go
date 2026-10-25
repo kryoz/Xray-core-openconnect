@@ -176,12 +176,15 @@ func TestLoadOrSeed(t *testing.T) {
 				}
 			}
 
-			got, err := LoadOrSeed(path, seed, nil)
+			got, fromFile, err := LoadOrSeed(path, seed, nil)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadOrSeed error = %v, wantErr %v", err, tc.wantErr)
 			}
 			if tc.wantErr {
 				return
+			}
+			if fromFile != tc.path {
+				t.Fatalf("the accounts came from an existing overlay = %v, want %v", fromFile, tc.path)
 			}
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %d user(s) %v, want %d", len(got), got, len(tc.want))
@@ -199,17 +202,23 @@ func TestLoadOrSeedWritesTheSeedOnce(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "users.json")
 
-	got, err := LoadOrSeed(path, sampleFile().Users, nil)
+	got, fromFile, err := LoadOrSeed(path, sampleFile().Users, nil)
 	if err != nil {
 		t.Fatalf("LoadOrSeed: %v", err)
+	}
+	if fromFile {
+		t.Fatal("the first start read an overlay that did not exist")
 	}
 	if len(got) != 2 {
 		t.Fatalf("the seed did not come back: %v", got)
 	}
 	// Seeded, so the next start has something to read — and it is readable.
-	again, err := LoadOrSeed(path, []*protocol.User{{Email: "config-only"}}, nil)
+	again, fromFile, err := LoadOrSeed(path, []*protocol.User{{Email: "config-only"}}, nil)
 	if err != nil {
 		t.Fatalf("LoadOrSeed after seeding: %v", err)
+	}
+	if !fromFile {
+		t.Fatal("the second start did not read the overlay the first one seeded")
 	}
 	if len(again) != 2 || again[0].Email != "alice@test" {
 		t.Fatalf("the second start did not read the seeded file: %v", again)
@@ -227,7 +236,7 @@ func TestLoadOrSeedValidatesBeforeWriting(t *testing.T) {
 	path := filepath.Join(dir, "users.json")
 
 	reject := func([]*protocol.User) error { return errors.New("bad seed") }
-	if _, err := LoadOrSeed(path, sampleFile().Users, reject); err == nil {
+	if _, _, err := LoadOrSeed(path, sampleFile().Users, reject); err == nil {
 		t.Fatal("a rejected seed passed LoadOrSeed")
 	}
 	if entries := dirEntries(t, dir); len(entries) != 0 {
@@ -240,14 +249,14 @@ func TestLoadOrSeedValidatesBeforeWriting(t *testing.T) {
 		}
 		return nil
 	}
-	if _, err := LoadOrSeed(path, sampleFile().Users, accept); err != nil {
+	if _, _, err := LoadOrSeed(path, sampleFile().Users, accept); err != nil {
 		t.Fatalf("LoadOrSeed with an accepting validator: %v", err)
 	}
 	if entries := dirEntries(t, dir); len(entries) != 1 {
 		t.Fatalf("the directory holds %v, want only the overlay", entries)
 	}
 	// An existing file is the source and is never run past the validator.
-	if _, err := LoadOrSeed(path, sampleFile().Users, reject); err != nil {
+	if _, _, err := LoadOrSeed(path, sampleFile().Users, reject); err != nil {
 		t.Fatalf("validateSeed must not run for an existing overlay: %v", err)
 	}
 }

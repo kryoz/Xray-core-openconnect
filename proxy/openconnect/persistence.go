@@ -45,7 +45,7 @@ func (c *OpenConnectInboundConfig) loadUsersFile(ctx context.Context) error {
 		probe.Users = staged
 		return probe.validate()
 	}
-	users, err := userstore.LoadOrSeed(c.UsersFile, seed, validateSeed)
+	users, fromFile, err := userstore.LoadOrSeed(c.UsersFile, seed, validateSeed)
 	if err != nil {
 		return errors.New("openconnect: ").Base(err)
 	}
@@ -59,6 +59,9 @@ func (c *OpenConnectInboundConfig) loadUsersFile(ctx context.Context) error {
 	}
 	c.Users = loaded
 	errors.LogInfo(ctx, "openconnect: ", len(loaded), " user(s) from ", c.UsersFile)
+	if fromFile && len(seed) > 0 {
+		errors.LogWarning(ctx, "openconnect: ", c.UsersFile, " is the source of accounts, so the ", len(seed), " user(s) declared in \"users\" are ignored; with a users file keep \"users\" empty")
+	}
 	return nil
 }
 

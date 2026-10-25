@@ -91,9 +91,11 @@ To make runtime changes survive a restart, give the inbound a `usersFile`:
 
 The file is seeded from `users` on the first start and is the source of accounts
 from then on: every add, block and remove is written to it atomically (0600,
-temp + rename), while the config file itself is never rewritten. Without
-`usersFile` the behavior is unchanged — runtime changes last until the next
-restart. VLESS inbounds take the same `settings.usersFile`.
+temp + rename), while the config file itself is never rewritten. Once the file
+is seeded, empty `users` out — an account the config still declares is shadowed
+by the file, and the node warns at start-up that the declaration went unread.
+Without `usersFile` the behavior is unchanged — runtime changes last until the
+next restart. VLESS inbounds take the same `settings.usersFile`.
 
 > **The management API is not authenticated.** Whoever can reach the commander
 > address (`-s`, the `commander`/stats inbound, default `127.0.0.1:8080`) can

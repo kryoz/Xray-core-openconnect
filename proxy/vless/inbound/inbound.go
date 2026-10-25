@@ -79,9 +79,12 @@ func init() {
 			}
 			return nil
 		}
-		users, err := userstore.LoadOrSeed(c.UsersFile, c.Users, validateSeed)
+		users, fromFile, err := userstore.LoadOrSeed(c.UsersFile, c.Users, validateSeed)
 		if err != nil {
 			return nil, errors.New("failed to load VLESS users").Base(err)
+		}
+		if fromFile && len(c.Users) > 0 {
+			errors.LogWarning(ctx, "vless: ", c.UsersFile, " is the source of accounts, so the ", len(c.Users), " user(s) declared in \"users\" are ignored; with a users file keep \"users\" empty")
 		}
 		c.Users = users
 

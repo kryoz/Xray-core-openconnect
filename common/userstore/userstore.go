@@ -121,34 +121,36 @@ func fsyncDir(dir string) {
 // seed is written out, so the first restart already has something to read.
 // With a file that exists, the file is the only source of users: an account
 // removed at runtime must not come back from the config on the next start.
+// The bool says which of the two it was: the caller needs it to tell the
+// operator that the config's own users went unread.
 //
 // validateSeed, when set, runs against the seed before it is written. The file
 // outlives a failed start, and once it exists it — not the config — is what
 // the next start reads: seeding from a config whose users do not validate
 // would turn one bad start into a permanently broken inbound.
-func LoadOrSeed(path string, seed []*protocol.User, validateSeed func([]*protocol.User) error) ([]*protocol.User, error) {
+func LoadOrSeed(path string, seed []*protocol.User, validateSeed func([]*protocol.User) error) ([]*protocol.User, bool, error) {
 	if path == "" {
-		return seed, nil
+		return seed, false, nil
 	}
 	ok, err := Exists(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if ok {
 		f, err := Load(path)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return f.GetUsers(), nil
+		return f.GetUsers(), true, nil
 	}
 	if validateSeed != nil {
 		if err := validateSeed(seed); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	f := &UserFile{Users: seed}
 	if err := Save(path, f); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return f.GetUsers(), nil
+	return f.GetUsers(), false, nil
 }

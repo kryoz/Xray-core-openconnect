@@ -144,7 +144,7 @@ func TestVLessUsersFileSeedsThenWins(t *testing.T) {
 
 	// Seeded from the config, and what was written has to be re-addable: the
 	// account is rebuilt through ToMemoryUser when the inbound starts.
-	got, err := userstore.LoadOrSeed(path, configUsers, nil)
+	got, _, err := userstore.LoadOrSeed(path, configUsers, nil)
 	if err != nil {
 		t.Fatalf("LoadOrSeed: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestVLessUsersFileSeedsThenWins(t *testing.T) {
 	}
 
 	// The file now exists, so the config no longer has a say.
-	again, err := userstore.LoadOrSeed(path, []*protocol.User{{Email: "back-from-the-config"}}, nil)
+	again, _, err := userstore.LoadOrSeed(path, []*protocol.User{{Email: "back-from-the-config"}}, nil)
 	if err != nil {
 		t.Fatalf("LoadOrSeed after seeding: %v", err)
 	}
